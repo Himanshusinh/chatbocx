@@ -301,10 +301,21 @@ function renderSidebar() {
   const peers = st.peers.filter((p) => match(p.name));
   html += `<div class="section-title">Direct messages <span class="section-count">${onlineCount} online</span></div>`;
   if (!st.peers.length) {
+    const macHint = st.platform === 'darwin' && (st.lookingForPeers || (st.uptimeMs || 0) > 2500);
     html += `<div class="empty-peers">
       <div>${ICON.wifi}</div>
       <p>Looking for colleagues on your network…</p>
-      <p class="muted">Anyone running OfficeLink on the same Wi-Fi or LAN shows up here automatically.</p>
+      <p class="muted">${
+        macHint
+          ? 'On a Mac, OfficeLink must be allowed to use the local network or new people will not appear.'
+          : 'Anyone running OfficeLink on the same Wi-Fi or LAN shows up here automatically.'
+      }</p>
+      ${
+        macHint
+          ? `<button type="button" class="primary-btn" id="mac-privacy-btn">Allow local network</button>
+             <p class="muted">System Settings → Privacy &amp; Security → Local Network → turn OfficeLink on. If macOS asks to accept incoming connections, click Allow. Then quit OfficeLink and open it again.</p>`
+          : ''
+      }
     </div>`;
   }
   peers
@@ -1116,7 +1127,7 @@ function showHelp() {
       <h4>Find colleagues</h4>
       <p>People on Wi-Fi and people plugged into the router appear automatically, and #general shows when someone new joins. If someone is missing, copy the address at the bottom left and send it to them — they tap <b>Add by IP</b>.</p>
       <h4>Mac: allow local network</h4>
-      <p>On a Mac, open <b>System Settings → Privacy &amp; Security → Local Network</b> and turn <b>OfficeLink</b> on. If a firewall prompt appears, choose <b>Allow</b>. Without that, names and messages from Windows PCs will not update.</p>
+      <p>On a Mac, open <b>System Settings → Privacy &amp; Security → Local Network</b> and turn <b>OfficeLink</b> on. Quit and reopen the app after that. If a firewall prompt appears, choose <b>Allow</b>. Without those, Windows PCs will chat with each other but will not show up on the Mac.</p>
       <h4>Share large files</h4>
       <p>Drop a PDF, zip, video, or any document into the chat. Files stay on the sender’s computer. Recipients click <b>Download</b>. Keep OfficeLink open so others can fetch files you shared.</p>
       <h4>Chat features</h4>
@@ -1371,6 +1382,7 @@ function wireUi() {
   $('#conv-list').addEventListener('click', (e) => {
     const item = e.target.closest('[data-conv]');
     if (item) openConv(item.dataset.conv);
+    if (e.target.closest('#mac-privacy-btn')) api.openMacPrivacy();
   });
   $('#conv-list').addEventListener('contextmenu', (e) => {
     const item = e.target.closest('[data-conv]');
@@ -1731,7 +1743,7 @@ async function init() {
   renderSidebar();
   await openConv('general');
   if (!S.state.onboarded) showOnboarding();
-  setInterval(() => S.state && renderSidebar(), 60000);
+  setInterval(() => S.state && renderSidebar(), 4000);
 }
 
 init();

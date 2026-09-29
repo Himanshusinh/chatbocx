@@ -276,6 +276,23 @@ function registerIpc() {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
   });
 
+  ipcMain.handle('open-mac-privacy', async () => {
+    const urls = [
+      'x-apple.systempreferences:com.apple.LocalNetwork-Settings.extension',
+      'x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocalNetwork',
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork',
+    ];
+    for (const url of urls) {
+      try {
+        await shell.openExternal(url);
+        return true;
+      } catch {
+        // try next macOS version’s URL
+      }
+    }
+    return false;
+  });
+
   ipcMain.handle('copy-text', async (_e, text) => {
     clipboard.writeText(String(text || ''));
   });

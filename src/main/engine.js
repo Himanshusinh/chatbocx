@@ -7,7 +7,8 @@ const http = require('http');
 const os = require('os');
 const { Transform, pipeline } = require('stream');
 const { JsonFile } = require('./store');
-const { Discovery, localAddresses, APP_TAG, sameSubnet, hostsOnInterface, reachableOn, ifaceKind, isIpv4 } = require('./discovery');
+const { Discovery, localAddresses, APP_TAG, sameSubnet, hostsOnInterface, reachableOn, ifaceKind, isIpv4, localAddressFor } = require('./discovery');
+const { BonjourDiscovery } = require('./bonjour');
 const { collectSource } = require('./codepack');
 
 const PROTOCOL_VERSION = 1;
@@ -164,6 +165,8 @@ class ChatEngine extends EventEmitter {
     this.lastCollected = new Map();
     this.notedJoins = new Set();
     this.helloBusy = new Set();
+    this.bonjour = null;
+    this.startedAt = Date.now();
     this.syncing = false;
     this.scanning = false;
     this.lastOnline = '';
@@ -270,9 +273,20 @@ class ChatEngine extends EventEmitter {
       this.discovery.on('beacon', (data, ip) => this.onBeacon(data, ip));
       this.discovery.on('error', (err) => this.emit('log', `Discovery: ${err.message}`));
       await this.discovery.start();
+      if (process.platform === 'darwin') {
+        this.bonjour = new BonjourDiscovery({ httpPort: this.port, peerId: this.me.id, peerName: this.me.name });
+        this.bonjour.on('peer', (hint) => {
+          this.emit('log', `Bonjour found ${hint.ip}:${hint.port}`);
+          this.helloPeer({ id: `mdns:${hint.ip}:${hint.port}`, ip: hint.ip, port: hint.port, ips: [hint.ip] });
+        });
+        this.bonjour.on('error', (err) => this.emit('log', `Bonjour: ${err.message}`));
+        this.bonjour.start();
+      }
+      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 800));
       this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 1500));
+      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 4000));
       this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 8000));
-      this.timers.push(setInterval(() => this.probeLan().catch(() => {}), 60000));
+      this.timers.push(setInterval(() => this.probeLan().catch(() => {}), process.platform === 'darwin' ? 12000 : 60000));
     }
 
     this.timers.push(setInterval(() => this.presenceTick(), this.presenceInterval));
@@ -281,20 +295,25 @@ class ChatEngine extends EventEmitter {
     return this.port;
   }
 
-  listen(port, attempt = 0) {
+  listen(port, attempt = 0, host = process.platform === 'darwin' ? '::' : '0.0.0.0') {
     return new Promise((resolve, reject) => {
       const onError = (err) => {
         this.server.removeListener('listening', onListening);
-        if (err.code === 'EADDRINUSE' && attempt < 30) resolve(this.listen(port + 1, attempt + 1));
+        if ((err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL') && host === '::') {
+          resolve(this.listen(port, attempt, '0.0.0.0'));
+          return;
+        }
+        if (err.code === 'EADDRINUSE' && attempt < 30) resolve(this.listen(port + 1, attempt + 1, host));
         else reject(err);
       };
       const onListening = () => {
         this.server.removeListener('error', onError);
-        resolve(this.server.address().port);
+        const addr = this.server.address();
+        resolve(typeof addr === 'object' && addr ? addr.port : port);
       };
       this.server.once('error', onError);
       this.server.once('listening', onListening);
-      this.server.listen({ port, host: '0.0.0.0', ipv6Only: false });
+      this.server.listen({ port, host, ipv6Only: false });
     });
   }
 
@@ -305,6 +324,8 @@ class ChatEngine extends EventEmitter {
       job.cancelled = true;
       job.req?.destroy();
     }
+    this.bonjour?.stop();
+    this.bonjour = null;
     this.discovery?.stop();
     const closed = new Promise((r) => (this.server ? this.server.close(() => r()) : r()));
     this.server?.closeAllConnections?.();
@@ -454,6 +475,8 @@ class ChatEngine extends EventEmitter {
     const online = Object.keys(this.peersFile.data).filter((id) => this.isOnline(id)).sort().join(',');
     if (online !== this.lastOnline) {
       this.lastOnline = online;
+      this.emitState();
+    } else if (process.platform === 'darwin') {
       this.emitState();
     }
     for (const id of Object.keys(this.outboxFile.data)) {
@@ -669,6 +692,7 @@ class ChatEngine extends EventEmitter {
   request(host, port, method, pathName, body, timeout = 8000) {
     return new Promise((resolve, reject) => {
       const payload = body ? Buffer.from(JSON.stringify(body)) : null;
+      const from = localAddressFor(host);
       const req = http.request(
         {
           hostname: host,
@@ -676,6 +700,7 @@ class ChatEngine extends EventEmitter {
           method,
           path: pathName,
           family: 4,
+          ...(from ? { localAddress: from } : {}),
           headers: {
             ...this.headers(),
             ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
@@ -1665,6 +1690,8 @@ class ChatEngine extends EventEmitter {
       muted: [...(this.metaFile.data.muted || [])],
       convs,
       platform: process.platform,
+      lookingForPeers: process.platform === 'darwin' && !this.peerList().some((p) => p.online),
+      uptimeMs: Date.now() - this.startedAt,
       appVersion: this.appVersion,
       codeSha: this.codePack().sha,
       feedVersion: this.feedVersion(),

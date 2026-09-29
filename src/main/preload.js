@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   showInFolder: (fileId) => ipcRenderer.invoke('show-in-folder', fileId),
   openFolder: (dir) => ipcRenderer.invoke('open-folder', dir),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  openMacPrivacy: () => ipcRenderer.invoke('open-mac-privacy'),
   copyText: (text) => ipcRenderer.invoke('copy-text', text),
   update: (action) => ipcRenderer.invoke('update', action),
   pathForFile: (file) => {

@@ -66,6 +66,14 @@ function reachableOn(ip, ifaces) {
   return (ifaces || localAddresses()).some((iface) => onSameNetwork(ip, iface.address, iface.netmask));
 }
 
+function localAddressFor(ip) {
+  if (!isIpv4(ip)) return undefined;
+  for (const iface of localAddresses()) {
+    if (onSameNetwork(ip, iface.address, iface.netmask)) return iface.address;
+  }
+  return undefined;
+}
+
 function hostsOnInterface({ address, netmask }) {
   if (!isIpv4(address) || isLinkLocal(address) || address.startsWith('127.')) return [];
   const addr = ipToInt(address);
@@ -136,17 +144,19 @@ function broadcastFor({ address, netmask }) {
   return intToIp((ipToInt(address) | (~ipToInt(netmask) >>> 0)) >>> 0);
 }
 
-function createUdp() {
+function createUdp({ reusePort = false } = {}) {
+  const opts = { type: 'udp4', reuseAddr: true };
+  if (reusePort) opts.reusePort = true;
   try {
-    return dgram.createSocket({ type: 'udp4', reuseAddr: true, reusePort: true });
+    return dgram.createSocket(opts);
   } catch {
     return dgram.createSocket({ type: 'udp4', reuseAddr: true });
   }
 }
 
-function bindSocket(port, address) {
+function bindSocket(port, address, { reusePort = false } = {}) {
   return new Promise((resolve, reject) => {
-    const socket = createUdp();
+    const socket = createUdp({ reusePort });
     socket.once('error', reject);
     socket.bind({ port, address, exclusive: false }, () => {
       socket.removeListener('error', reject);
@@ -167,9 +177,10 @@ function bindSocket(port, address) {
 }
 
 /**
- * Finds other OfficeLink instances on the local network by periodically
- * broadcasting a small UDP beacon on every real IPv4 interface, plus multicast.
- * macOS needs a socket per Wi-Fi/Ethernet address or broadcasts are dropped.
+ * Finds other OfficeLink instances on the local network.
+ * On macOS we receive on one wildcard socket and send from each
+ * Wi-Fi/LAN address. Binding several sockets to the same port with
+ * SO_REUSEPORT drops broadcasts on Darwin.
  */
 class Discovery extends EventEmitter {
   constructor({ port, getBeacon, interval = 2000 }) {
@@ -178,15 +189,16 @@ class Discovery extends EventEmitter {
     this.getBeacon = getBeacon;
     this.interval = interval;
     this.sockets = new Map();
+    this.tx = new Map();
     this.timer = null;
     this.bursts = [];
+    this.isMac = process.platform === 'darwin';
   }
 
   async start() {
     await this.refreshSockets();
-    await this.ensureSocket('0.0.0.0');
     this.announce('hello');
-    for (const ms of [150, 400, 900, 1800, 3500, 7000]) {
+    for (const ms of [100, 300, 700, 1500, 3000, 6000, 12000]) {
       this.bursts.push(setTimeout(() => this.announce('hello'), ms));
     }
     this.timer = setInterval(() => {
@@ -226,13 +238,28 @@ class Discovery extends EventEmitter {
     }
   }
 
-  async ensureSocket(address) {
-    if (this.sockets.has(address)) return this.sockets.get(address);
+  async ensureRecv() {
+    if (this.sockets.has('0.0.0.0')) return this.sockets.get('0.0.0.0');
     try {
-      const socket = await bindSocket(this.port, address);
+      const socket = await bindSocket(this.port, '0.0.0.0', { reusePort: false });
       this.wire(socket);
-      this.joinMulticast(socket, address === '0.0.0.0' ? undefined : address);
-      this.sockets.set(address, socket);
+      for (const iface of localAddresses()) this.joinMulticast(socket, iface.address);
+      this.sockets.set('0.0.0.0', socket);
+      return socket;
+    } catch (err) {
+      this.emit('error', err);
+      return null;
+    }
+  }
+
+  async ensureTx(address) {
+    if (this.tx.has(address)) return this.tx.get(address);
+    try {
+      const socket = await bindSocket(this.isMac ? 0 : this.port, address, { reusePort: !this.isMac });
+      if (!this.isMac) this.wire(socket);
+      this.joinMulticast(socket, address);
+      this.tx.set(address, socket);
+      if (!this.isMac) this.sockets.set(address, socket);
       return socket;
     } catch (err) {
       this.emit('error', err);
@@ -241,12 +268,13 @@ class Discovery extends EventEmitter {
   }
 
   async refreshSockets() {
+    await this.ensureRecv();
     const ifaces = localAddresses();
     const wanted = new Set(ifaces.map((a) => a.address));
-    for (const addr of wanted) await this.ensureSocket(addr);
-    await this.ensureSocket('0.0.0.0');
-    for (const [addr, socket] of this.sockets) {
-      if (wanted.has(addr) || addr === '0.0.0.0') continue;
+    for (const addr of wanted) await this.ensureTx(addr);
+    for (const [addr, socket] of this.tx) {
+      if (wanted.has(addr)) continue;
+      this.tx.delete(addr);
       this.sockets.delete(addr);
       try {
         socket.close();
@@ -254,11 +282,23 @@ class Discovery extends EventEmitter {
         // gone
       }
     }
+    const recv = this.sockets.get('0.0.0.0');
+    if (recv) {
+      for (const iface of ifaces) this.joinMulticast(recv, iface.address);
+    }
+  }
+
+  senders() {
+    const list = [...this.tx.values()];
+    const wildcard = this.sockets.get('0.0.0.0');
+    if (wildcard && !this.isMac) list.push(wildcard);
+    if (!list.length && wildcard) list.push(wildcard);
+    return list;
   }
 
   send(payload, address, fromSocket) {
     const buf = Buffer.from(JSON.stringify(payload));
-    const sockets = fromSocket ? [fromSocket] : [...this.sockets.values()];
+    const sockets = fromSocket ? [fromSocket] : this.senders();
     for (const socket of sockets) {
       try {
         socket.send(buf, this.port, address, () => {});
@@ -277,17 +317,16 @@ class Discovery extends EventEmitter {
       return;
     }
     if (!payload.port) return;
-    const wildcard = this.sockets.get('0.0.0.0');
-    if (wildcard) {
-      this.send(payload, '255.255.255.255', wildcard);
-      this.send(payload, MULTICAST, wildcard);
-    }
     for (const iface of localAddresses()) {
-      const sock = this.sockets.get(iface.address);
+      const sock = this.tx.get(iface.address);
       if (!sock) continue;
       this.send(payload, broadcastFor(iface), sock);
       this.send(payload, '255.255.255.255', sock);
       this.send(payload, MULTICAST, sock);
+    }
+    if (!this.tx.size) {
+      this.send(payload, '255.255.255.255');
+      this.send(payload, MULTICAST);
     }
   }
 
@@ -318,8 +357,9 @@ class Discovery extends EventEmitter {
     } catch {
       // ignore
     }
-    const sockets = [...this.sockets.values()];
+    const sockets = [...this.sockets.values(), ...this.tx.values()];
     this.sockets.clear();
+    this.tx.clear();
     setTimeout(() => {
       for (const socket of sockets) {
         try {
@@ -340,6 +380,7 @@ module.exports = {
   sameSubnet,
   onSameNetwork,
   reachableOn,
+  localAddressFor,
   hostsOnInterface,
   isVirtualIface,
   ifaceKind,

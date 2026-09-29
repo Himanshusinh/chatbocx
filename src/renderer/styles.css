@@ -465,9 +465,8 @@ body.mac .titlebar-space {
   animation: pulse 1.8s ease-in-out infinite;
 }
 
-.empty-peers p {
-  margin: 6px 0 0;
-  font-size: 12.5px;
+.empty-peers .primary-btn {
+  margin-top: 12px;
 }
 
 @keyframes pulse {
