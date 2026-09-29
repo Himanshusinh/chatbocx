@@ -67,6 +67,11 @@ async function sha256(file) {
   await carol.stop();
   console.log('✓ a new device is introduced to everyone and shows as joined');
 
+  const found = await alice.findUsers();
+  assert.ok(found.peers >= 1, 'find users still lists known colleagues');
+  assert.ok(found.online >= 1, 'find users reports online colleagues');
+  console.log('✓ find users refreshes the colleague list');
+
   // Direct message, delivery + read receipts
   const dm = dmId(alice.me.id, bob.me.id);
   const sent = alice.sendText(dm, 'Hello Bob!');

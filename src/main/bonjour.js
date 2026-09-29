@@ -33,6 +33,14 @@ class BonjourDiscovery extends EventEmitter {
     this.browse();
   }
 
+  /** Re-browse so people who joined after the first lookup are found. */
+  refresh() {
+    if (process.platform !== 'darwin') return;
+    this.seen.clear();
+    this.stop();
+    this.start();
+  }
+
   spawn(args, onData) {
     let child;
     try {

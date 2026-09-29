@@ -338,6 +338,48 @@ body.mac .titlebar-space {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.find-users-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 12px 10px;
+  width: calc(100% - 24px);
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.find-users-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.find-users-btn:hover {
+  filter: brightness(1.08);
+}
+
+.find-users-btn:disabled,
+.find-users-btn.busy {
+  opacity: 0.72;
+  cursor: default;
+  filter: none;
+}
+
+.find-users-btn.busy svg {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .conv-list {
   flex: 1;
   overflow-y: auto;

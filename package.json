@@ -1,7 +1,7 @@
 {
   "name": "officelink",
   "productName": "OfficeLink",
-    "version": "1.2.3",
+    "version": "1.2.4",
   "description": "Serverless LAN chat and large file sharing for offices (macOS & Windows)",
   "main": "src/main/main.js",
   "author": "OfficeLink",

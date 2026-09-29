@@ -169,6 +169,10 @@ class ChatEngine extends EventEmitter {
     this.startedAt = Date.now();
     this.syncing = false;
     this.scanning = false;
+    this.finding = false;
+    this.scanPromise = null;
+    this.syncPromise = null;
+    this.findPromise = null;
     this.lastOnline = '';
     this.activeConv = null;
     this.focused = true;
@@ -493,12 +497,22 @@ class ChatEngine extends EventEmitter {
     await this.syncKnownPeers();
   }
 
-  async syncKnownPeers() {
-    if (this.syncing) return;
+  async syncKnownPeers({ force = false } = {}) {
+    if (this.syncing) {
+      if (!force) return;
+      try {
+        await this.syncPromise;
+      } catch {
+        // previous pass finished with errors
+      }
+    }
     this.syncing = true;
-    try {
+    this.syncPromise = (async () => {
       const peers = Object.values(this.peersFile.data).filter((p) => (p.ws || '') === this.workspace && p.ip && p.port);
       await Promise.all(peers.map((p) => this.syncWithPeer(p).catch(() => {})));
+    })();
+    try {
+      await this.syncPromise;
     } finally {
       this.syncing = false;
     }
@@ -582,8 +596,9 @@ class ChatEngine extends EventEmitter {
   }
 
   gossipPeers(exceptId) {
+    const recent = Date.now() - 120000;
     return this.peerList()
-      .filter((p) => p.online && p.ip && p.port && p.id !== exceptId)
+      .filter((p) => p.ip && p.port && p.id !== exceptId && (p.online || (p.lastSeen || 0) > recent))
       .slice(0, 40)
       .map((p) => ({
         id: p.id,
@@ -624,16 +639,16 @@ class ChatEngine extends EventEmitter {
     return [...new Set((list || []).map(cleanIp).filter(isIpv4))].sort((a, b) => Number(reachableOn(b)) - Number(reachableOn(a)));
   }
 
-  helloPeer(p) {
+  helloPeer(p, { force = false } = {}) {
     if (!p?.ip || p.id === this.me.id) return;
     const key = p.id || `${p.ip}:${p.port}`;
-    if (this.helloBusy.has(key)) return;
+    if (this.helloBusy.has(key) && !force) return;
     this.helloBusy.add(key);
     const tryHello = async () => {
       const ips = this.orderIps([p.ip, ...(p.ips || [])]);
       for (const ip of ips) {
         try {
-          const res = await this.request(ip, p.port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers(p.id) }, 2500);
+          const res = await this.request(ip, p.port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers(p.id) }, force ? 4000 : 2500);
           if (res.profile) {
             this.touchPeer(res.profile, ip, { manual: !!p.manual });
             this.ingestGossip(res.peers, ip);
@@ -646,7 +661,7 @@ class ChatEngine extends EventEmitter {
     };
     tryHello()
       .catch(() => {})
-      .finally(() => setTimeout(() => this.helloBusy.delete(key), 2000));
+      .finally(() => setTimeout(() => this.helloBusy.delete(key), force ? 400 : 2000));
   }
 
   lanNeighborIps() {
@@ -655,21 +670,30 @@ class ChatEngine extends EventEmitter {
     return [...new Set(ips)];
   }
 
-  async probeLan() {
-    if (this.scanning || !this.enableDiscovery) return;
+  async probeLan({ force = false, timeout = process.platform === 'darwin' ? 800 : 500 } = {}) {
+    if (!this.enableDiscovery) return { scanned: 0, found: 0 };
+    if (this.scanning) {
+      if (!force) return { scanned: 0, found: 0 };
+      try {
+        await this.scanPromise;
+      } catch {
+        // previous scan finished
+      }
+    }
     const targets = this.lanNeighborIps();
-    if (!targets.length) return;
+    if (!targets.length) return { scanned: 0, found: 0 };
     this.scanning = true;
     this.emit('log', `Scanning Wi-Fi and LAN for OfficeLink (${targets.length} addresses)`);
-    const ports = [...new Set([this.port, this.preferredPort, 45321, 45322])].filter(Boolean);
-    const concurrency = 48;
+    const before = this.peerList().length;
+    const ports = [...new Set([this.port, this.preferredPort, 45321, 45322, 45323])].filter(Boolean);
+    const concurrency = process.platform === 'darwin' ? 32 : 48;
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
         const ip = targets[next++];
         for (const port of ports) {
           try {
-            const res = await this.request(ip, port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers() }, 500);
+            const res = await this.request(ip, port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers() }, timeout);
             if (res.profile && res.profile.id !== this.me.id) {
               this.touchPeer(res.profile, ip);
               this.ingestGossip(res.peers, ip);
@@ -680,11 +704,53 @@ class ChatEngine extends EventEmitter {
         }
       }
     };
+    this.scanPromise = Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, () => worker()));
     try {
-      await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, () => worker()));
+      await this.scanPromise;
     } finally {
       this.scanning = false;
     }
+    return { scanned: targets.length, found: Math.max(0, this.peerList().length - before) };
+  }
+
+  async findUsers() {
+    if (this.findPromise) return this.findPromise;
+    this.finding = true;
+    this.emitState();
+    const before = new Set(this.peerList().map((p) => p.id));
+    this.findPromise = (async () => {
+      try {
+        this.helloBusy.clear();
+        this.bonjour?.refresh();
+        this.discovery?.announce('hello');
+        this.discovery?.announce('probe');
+        for (const p of Object.values(this.peersFile.data)) {
+          if (!p?.ip) continue;
+          this.discovery?.unicast(p.ip);
+          this.helloPeer(p, { force: true });
+        }
+        await this.syncKnownPeers({ force: true });
+        await this.probeLan({ force: true });
+        await this.syncKnownPeers({ force: true });
+      } finally {
+        this.finding = false;
+        this.findPromise = null;
+        this.emitState();
+      }
+      const added = this.peerList().filter((p) => !before.has(p.id));
+      return this.findUsersResult(added);
+    })();
+    return this.findPromise;
+  }
+
+  findUsersResult(added = []) {
+    const peers = this.peerList();
+    return {
+      peers: peers.length,
+      online: peers.filter((p) => p.online).length,
+      added: added.length,
+      names: added.map((p) => p.name),
+    };
   }
 
   // --------------------------------------------------------------- transport
@@ -1645,6 +1711,7 @@ class ChatEngine extends EventEmitter {
         status: p.status,
         ip: p.ip,
         port: p.port,
+        ips: [...(p.ips || [])],
         manual: !!p.manual,
         lastSeen: p.lastSeen,
         online: this.isOnline(p.id),
@@ -1691,6 +1758,7 @@ class ChatEngine extends EventEmitter {
       convs,
       platform: process.platform,
       lookingForPeers: process.platform === 'darwin' && !this.peerList().some((p) => p.online),
+      findingUsers: !!this.finding,
       uptimeMs: Date.now() - this.startedAt,
       appVersion: this.appVersion,
       codeSha: this.codePack().sha,

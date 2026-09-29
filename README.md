@@ -22,8 +22,8 @@ Nothing is uploaded to a cloud. Messages and files travel directly between offic
 
 Two disk images are already built:
 
-- **Apple Silicon (M1/M2/M3/M4):** `dist/OfficeLink-1.2.3-mac-arm64.dmg`
-- **Intel Mac:** `dist/OfficeLink-1.2.3-mac-x64.dmg`
+- **Apple Silicon (M1/M2/M3/M4):** `dist/OfficeLink-1.2.4-mac-arm64.dmg`
+- **Intel Mac:** `dist/OfficeLink-1.2.4-mac-x64.dmg`
 
 Open the matching DMG, drag **OfficeLink** into **Applications**, then open it from there. macOS may ask to allow **local network** access — accept that, or colleagues will not appear automatically.
 

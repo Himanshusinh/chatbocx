@@ -60,6 +60,7 @@ const S = {
   replyTo: null,
   editing: null,
   transfers: new Map(),
+  finding: false,
   filter: '',
   focused: true,
   lastTypingSent: 0,
@@ -205,6 +206,40 @@ async function call(method, ...args) {
   }
 }
 
+function paintFindUsersBtn() {
+  const btn = $('#find-users-btn');
+  if (!btn) return;
+  const busy = S.finding || !!S.state?.findingUsers;
+  btn.disabled = busy;
+  btn.classList.toggle('busy', busy);
+  btn.innerHTML = busy ? `${ICON.retry}<span>Finding people…</span>` : `${ICON.wifi}<span>Find users</span>`;
+}
+
+async function findUsers() {
+  if (S.finding) return;
+  S.finding = true;
+  paintFindUsersBtn();
+  toast('Scanning Wi-Fi and LAN for colleagues…');
+  try {
+    const res = await call('findUsers');
+    S.finding = false;
+    paintFindUsersBtn();
+    if (res?.added) {
+      const names = (res.names || []).filter(Boolean);
+      toast(names.length ? `Found ${names.join(', ')}` : `Found ${res.added} new colleague${res.added === 1 ? '' : 's'}`, 'success');
+    } else if (res?.online) {
+      toast(`${res.online} colleague${res.online === 1 ? '' : 's'} online`, 'success');
+    } else if (S.state?.platform === 'darwin') {
+      toast('Nobody new yet. Turn on Local Network for OfficeLink, then try Find users again.');
+    } else {
+      toast('Nobody new on this network yet. Make sure OfficeLink is open on their computer.');
+    }
+  } catch {
+    S.finding = false;
+    paintFindUsersBtn();
+  }
+}
+
 // ---------------------------------------------------------- conversations
 
 function convTitle(convId) {
@@ -307,8 +342,8 @@ function renderSidebar() {
       <p>Looking for colleagues on your network…</p>
       <p class="muted">${
         macHint
-          ? 'On a Mac, OfficeLink must be allowed to use the local network or new people will not appear.'
-          : 'Anyone running OfficeLink on the same Wi-Fi or LAN shows up here automatically.'
+          ? 'Tap Find users above to scan the office network. OfficeLink must also be allowed to use the local network.'
+          : 'Tap Find users above, or wait — anyone running OfficeLink on the same Wi-Fi or LAN shows up here.'
       }</p>
       ${
         macHint
@@ -338,6 +373,7 @@ function renderSidebar() {
 
   const unread = Object.values(st.convs).reduce((n, c) => n + (c.unread || 0), 0);
   document.title = unread ? `(${unread}) OfficeLink` : 'OfficeLink';
+  paintFindUsersBtn();
 }
 
 function renderHeader() {
@@ -1350,6 +1386,7 @@ function wireUi() {
   $('#help-btn').innerHTML = ICON.help;
   $('#copy-addr-btn').innerHTML = ICON.copyAddr;
   $('#add-peer-btn').innerHTML = `${ICON.plus}<span>Add by IP</span>`;
+  paintFindUsersBtn();
   $('#attach-btn').innerHTML = ICON.clip;
   $('#emoji-btn').innerHTML = ICON.smile;
   $('#send-btn').innerHTML = ICON.send;
@@ -1374,6 +1411,7 @@ function wireUi() {
     toast(netAddrs(st).length > 1 ? 'Wi-Fi and LAN addresses copied' : 'Address copied — send it to a colleague to Add by IP', 'success');
   });
   $('#add-peer-btn').addEventListener('click', showAddPeer);
+  $('#find-users-btn').addEventListener('click', findUsers);
   $('#new-group-btn').addEventListener('click', () => showGroupModal(null));
   $('#side-filter').addEventListener('input', (e) => {
     S.filter = e.target.value;

@@ -215,6 +215,7 @@ const ENGINE_METHODS = new Set([
   'downloadFile',
   'cancelDownload',
   'addPeerByAddress',
+  'findUsers',
   'removePeer',
   'search',
   'togglePin',
