@@ -1,0 +1,84 @@
+{
+  "name": "officelink",
+  "productName": "OfficeLink",
+    "version": "1.2.0",
+  "description": "Serverless LAN chat and large file sharing for offices (macOS & Windows)",
+  "main": "src/main/main.js",
+  "author": "OfficeLink",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "start:second": "cross-env OFFICELINK_PROFILE=second electron .",
+    "icons": "node scripts/make-icon.js",
+    "test": "node test/network.test.js && node test/update.test.js",
+    "publish:feed": "node scripts/publish-feed.js",
+    "dist:mac": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
+    "dist:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --x64",
+    "dist": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --win",
+    "release:mac": "npm run dist:mac && npm run publish:feed",
+    "release:win": "npm run dist:win && npm run publish:feed",
+    "release": "npm run dist && npm run publish:feed"
+  },
+  "build": {
+    "appId": "com.officelink.chat",
+    "productName": "OfficeLink",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "OfficeLink uses your local network to find colleagues and send messages and files directly between computers.",
+        "NSBonjourServices": ["_officelink._udp.", "_officelink._tcp."]
+      },
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "artifactName": "${productName}-Setup-${version}-win-${arch}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "include": "build/installer.nsh",
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "OfficeLink"
+    },
+    "toolsets": {
+      "wine": "1.0.1",
+      "nsis": "1.2.1"
+    }
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  }
+}

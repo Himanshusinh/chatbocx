@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: olfile:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>OfficeLink</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="titlebar-space drag"></div>
+        <div class="side-head drag">
+          <button id="me-btn" class="me no-drag" title="Your profile and settings"></button>
+          <button id="new-group-btn" class="icon-btn no-drag" title="New group"></button>
+        </div>
+        <div class="side-search">
+          <input id="side-filter" type="search" placeholder="Search people and groups" autocomplete="off" />
+        </div>
+        <div id="conv-list" class="conv-list"></div>
+        <div class="side-foot">
+          <div id="net-status" class="net-status"></div>
+          <button id="copy-addr-btn" class="icon-btn" title="Copy my network address" hidden></button>
+          <button id="add-peer-btn" class="ghost-btn" title="Connect to a colleague by IP address"></button>
+          <button id="help-btn" class="icon-btn" title="How OfficeLink works"></button>
+          <button id="settings-btn" class="icon-btn" title="Settings"></button>
+        </div>
+      </aside>
+      <main id="main">
+        <header id="chat-head" class="chat-head drag"></header>
+        <div id="update-banner" class="update-banner" hidden></div>
+        <div id="search-panel" class="search-panel" hidden>
+          <input id="search-input" type="search" placeholder="Search messages and files in this chat" autocomplete="off" />
+          <div id="search-results" class="search-results"></div>
+        </div>
+        <div class="messages-wrap">
+          <div id="messages" class="messages"></div>
+          <button id="jump-latest" class="jump-latest" hidden></button>
+        </div>
+        <div id="typing" class="typing"></div>
+        <div id="composer" class="composer">
+          <div id="compose-banner" class="compose-banner" hidden></div>
+          <div class="compose-row">
+            <button id="attach-btn" class="icon-btn" title="Share files (any size)"></button>
+            <div class="compose-input">
+              <div id="mention-list" class="mention-list" hidden></div>
+              <textarea id="input" rows="1" placeholder="Write a message"></textarea>
+            </div>
+            <button id="emoji-btn" class="icon-btn" title="Emoji"></button>
+            <button id="send-btn" class="send-btn" title="Send (Enter)"></button>
+          </div>
+          <div class="compose-hint">
+            <b>Enter</b> to send · <b>Shift+Enter</b> new line · drag files anywhere to share ·
+            <code>*bold*</code> <code>_italic_</code> <code>`code`</code>
+          </div>
+        </div>
+        <div id="drop-overlay" class="drop-overlay" hidden>
+          <div class="drop-card">
+            <div class="drop-icon"></div>
+            <div class="drop-title">Drop to share</div>
+            <div id="drop-sub" class="drop-sub"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <div id="modal-root"></div>
+    <div id="popover-root"></div>
+    <div id="toast-root" class="toast-root"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
