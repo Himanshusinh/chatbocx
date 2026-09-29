@@ -35,7 +35,7 @@ To rebuild later: `npm run dist:mac`
 
 Two files are already built and ready to copy to a USB stick or office share:
 
-- **Installer:** `dist/OfficeLink-Setup-1.2.2-win-x64.exe`  
+- **Installer:** `dist/OfficeLink-Setup-1.2.4-win-x64.exe`  
   Double-click on a Windows PC, choose a folder, and finish. It creates Start Menu and desktop shortcuts, and allows OfficeLink through Windows Firewall so LAN chat and file downloads work.
 
 Windows may warn that the app is unsigned. Choose **More info** → **Run anyway**.
