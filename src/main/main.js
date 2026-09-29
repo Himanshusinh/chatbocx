@@ -369,13 +369,15 @@ async function boot() {
   createTray();
 
   powerMonitor.on('resume', () => {
-    engine.discovery?.announce();
+    engine.discovery?.announce('hello');
     engine.syncKnownPeers?.();
+    engine.probeLan?.().catch(() => {});
   });
   probeLocalNetwork();
 }
 
 function probeLocalNetwork() {
+  engine?.discovery?.announce('hello');
   if (process.platform !== 'darwin') return;
   const dgram = require('dgram');
   const probe = dgram.createSocket({ type: 'udp4', reuseAddr: true });

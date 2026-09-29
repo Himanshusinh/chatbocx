@@ -1,6 +1,6 @@
 # OfficeLink
 
-Local office chat for **macOS** and **Windows**. Install it on each computer, stay on the same Wi-Fi or LAN, and share messages plus large files without the internet.
+Local office chat for **macOS** and **Windows**. Install it on each computer. It works over **Wi-Fi and LAN (ethernet)** on the same office router — people on wireless and people on a cable can chat together.
 
 Nothing is uploaded to a cloud. Messages and files travel directly between office computers.
 
@@ -22,8 +22,8 @@ Nothing is uploaded to a cloud. Messages and files travel directly between offic
 
 Two disk images are already built:
 
-- **Apple Silicon (M1/M2/M3/M4):** `dist/OfficeLink-1.1.1-mac-arm64.dmg`
-- **Intel Mac:** `dist/OfficeLink-1.1.1-mac-x64.dmg`
+- **Apple Silicon (M1/M2/M3/M4):** `dist/OfficeLink-1.2.2-mac-arm64.dmg`
+- **Intel Mac:** `dist/OfficeLink-1.2.2-mac-x64.dmg`
 
 Open the matching DMG, drag **OfficeLink** into **Applications**, then open it from there. macOS may ask to allow **local network** access — accept that, or colleagues will not appear automatically.
 
@@ -35,7 +35,7 @@ To rebuild later: `npm run dist:mac`
 
 Two files are already built and ready to copy to a USB stick or office share:
 
-- **Installer:** `dist/OfficeLink-Setup-1.1.1-win-x64.exe`  
+- **Installer:** `dist/OfficeLink-Setup-1.2.2-win-x64.exe`  
   Double-click on a Windows PC, choose a folder, and finish. It creates Start Menu and desktop shortcuts, and allows OfficeLink through Windows Firewall so LAN chat and file downloads work.
 
 Windows may warn that the app is unsigned. Choose **More info** → **Run anyway**.

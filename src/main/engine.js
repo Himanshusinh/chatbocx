@@ -7,7 +7,7 @@ const http = require('http');
 const os = require('os');
 const { Transform, pipeline } = require('stream');
 const { JsonFile } = require('./store');
-const { Discovery, localAddresses, APP_TAG } = require('./discovery');
+const { Discovery, localAddresses, APP_TAG, sameSubnet, hostsOnInterface, reachableOn, ifaceKind, isIpv4 } = require('./discovery');
 const { collectSource } = require('./codepack');
 
 const PROTOCOL_VERSION = 1;
@@ -132,7 +132,7 @@ class ChatEngine extends EventEmitter {
       shareUpdates: true,
       updateFeedDir: '',
       updateRepo: '',
-      updateBranch: 'master',
+      updateBranch: 'main',
       ...this.config.data.settings,
     };
     this.config.save();
@@ -162,7 +162,10 @@ class ChatEngine extends EventEmitter {
     this.downloads = new Map();
     this.pendingAcks = new Map();
     this.lastCollected = new Map();
+    this.notedJoins = new Set();
+    this.helloBusy = new Set();
     this.syncing = false;
+    this.scanning = false;
     this.lastOnline = '';
     this.activeConv = null;
     this.focused = true;
@@ -260,12 +263,16 @@ class ChatEngine extends EventEmitter {
     });
     this.server.keepAliveTimeout = 30000;
     this.port = await this.listen(this.preferredPort);
+    this.codePack();
 
     if (this.enableDiscovery) {
       this.discovery = new Discovery({ port: this.discoveryPort, getBeacon: () => this.publicProfile() });
       this.discovery.on('beacon', (data, ip) => this.onBeacon(data, ip));
       this.discovery.on('error', (err) => this.emit('log', `Discovery: ${err.message}`));
       await this.discovery.start();
+      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 1500));
+      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 8000));
+      this.timers.push(setInterval(() => this.probeLan().catch(() => {}), 60000));
     }
 
     this.timers.push(setInterval(() => this.presenceTick(), this.presenceInterval));
@@ -313,14 +320,11 @@ class ChatEngine extends EventEmitter {
   // ----------------------------------------------------------------- presence
 
   publicProfile() {
-    const feed = this.feedVersion();
-    const pack = this.codePack();
+    const pack = this._codePack || { sha: '', mtime: 0 };
     return {
       app: APP_TAG,
       v: PROTOCOL_VERSION,
       ver: this.appVersion,
-      feed: feed || '',
-      upd: true,
       rev: (pack.sha || '').slice(0, 16),
       cts: Math.round(pack.mtime || 0),
       id: this.me.id,
@@ -329,6 +333,9 @@ class ChatEngine extends EventEmitter {
       status: this.me.status,
       port: this.port,
       ws: this.workspace,
+      ips: localAddresses()
+        .map((a) => a.address)
+        .slice(0, 12),
     };
   }
 
@@ -348,10 +355,13 @@ class ChatEngine extends EventEmitter {
     if ((info.ws || '') !== this.workspace) return null;
     const port = Number(info.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    ip = this.bestIp(info, ip);
+    if (!ip) return null;
 
     const peers = this.peersFile.data;
     const existing = peers[info.id];
     const wasOnline = this.isOnline(info.id);
+    const firstSeen = !existing;
     const p = existing || { id: info.id };
     const name = String(info.name || 'Unknown').slice(0, 64);
     const changed =
@@ -362,19 +372,21 @@ class ChatEngine extends EventEmitter {
       p.ip !== ip ||
       p.port !== port ||
       p.appVersion !== String(info.ver || '') ||
-      p.feedVersion !== String(info.feed || '') ||
-      p.codeSha !== String(info.rev || '') ||
-      !!p.sharingUpdates !== !!info.upd;
+      p.codeSha !== String(info.rev || '');
+    const mergedIps = [ip, ...(Array.isArray(info.ips) ? info.ips : []), ...(p.ips || [])]
+      .map(cleanIp)
+      .filter((x) => isIpv4(x));
     Object.assign(p, {
       name,
       color: typeof info.color === 'string' ? info.color : COLORS[0],
       status: ['online', 'away', 'busy'].includes(info.status) ? info.status : 'online',
       ip,
       port,
+      ips: [...new Set(mergedIps)].slice(0, 12),
       ws: info.ws || '',
       lastSeen: Date.now(),
       appVersion: String(info.ver || '').slice(0, 32),
-      feedVersion: String(info.feed || '').slice(0, 32),
+      feedVersion: String(info.feed || p.feedVersion || '').slice(0, 32),
       codeSha: String(info.rev || '').slice(0, 64),
       codeTime: Number(info.cts) || 0,
       sharingUpdates: true,
@@ -384,23 +396,58 @@ class ChatEngine extends EventEmitter {
     this.seen.set(info.id, Date.now());
     this.peersFile.save();
 
+    if (firstSeen) {
+      this.notePeerJoined(p);
+      this.introducePeer(p);
+    }
     if (!wasOnline) this.flushOutbox(info.id);
-    if (changed || !wasOnline) this.emitState();
+    if (changed || !wasOnline || firstSeen) this.emitState();
     return p;
   }
 
+  bestIp(info, fromIp) {
+    fromIp = cleanIp(fromIp);
+    if (fromIp && /^\d{1,3}(\.\d{1,3}){3}$/.test(fromIp)) return fromIp;
+    const mine = localAddresses().map((a) => a.address);
+    const raw = [info?.ip, ...(Array.isArray(info?.ips) ? info.ips : [])]
+      .map(cleanIp)
+      .filter((ip) => ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip));
+    const unique = [...new Set(raw)].filter(isIpv4);
+    unique.sort((a, b) => Number(reachableOn(b)) - Number(reachableOn(a)) || Number(sameSubnet(mine[0], b)) - Number(sameSubnet(mine[0], a)));
+    return unique[0] || null;
+  }
+
+  notePeerJoined(p) {
+    if (!p?.id || this.notedJoins.has(p.id)) return;
+    this.notedJoins.add(p.id);
+    const name = p.name || 'Someone';
+    this.addSystemMessage('general', `${name} joined`);
+    const visible = this.focused && this.activeConv === 'general';
+    if (!visible) {
+      this.metaFile.data.unread.general = (this.metaFile.data.unread.general || 0) + 1;
+      this.metaFile.save();
+    }
+    this.emit('notify', { convId: 'general', title: 'OfficeLink', body: `${name} joined`, sound: this.me.status !== 'busy' });
+  }
+
   onBeacon(data, ip) {
-    if (data.id === this.me.id) return;
+    ip = cleanIp(ip);
+    if (!data || data.id === this.me.id) return;
     if (data.type === 'bye') {
-      if (this.seen.has(data.id)) {
+      if (data.id && this.seen.has(data.id)) {
         this.seen.delete(data.id);
         this.emitState();
       }
       return;
     }
+    if (data.type === 'probe' || !data.id) {
+      this.discovery?.reply(ip);
+      return;
+    }
     const wasOnline = this.isOnline(data.id);
     const peer = this.touchPeer(data, ip);
-    if (peer && !wasOnline && data.type === 'beacon') this.discovery?.reply(ip);
+    if (data.type !== 'reply') this.discovery?.reply(ip);
+    if (peer && !wasOnline) this.helloPeer(peer);
   }
 
   presenceTick() {
@@ -411,6 +458,11 @@ class ChatEngine extends EventEmitter {
     }
     for (const id of Object.keys(this.outboxFile.data)) {
       if (this.isOnline(id)) this.flushOutbox(id);
+    }
+    if (this.discovery) {
+      for (const p of Object.values(this.peersFile.data)) {
+        for (const ip of new Set([p.ip, ...(p.ips || [])].filter(isIpv4))) this.discovery.unicast(ip);
+      }
     }
   }
 
@@ -432,15 +484,34 @@ class ChatEngine extends EventEmitter {
   async syncWithPeer(p, depth = 0) {
     if (!p?.ip || p.id === this.me.id || depth > 40) return;
     const acks = this.pendingAcks.get(p.id) || [];
+    const ips = this.orderIps([p.ip, ...(p.ips || [])]);
     let res;
-    try {
-      res = await this.request(p.ip, p.port, 'POST', '/api/collect', { profile: this.publicProfile(), acks }, 4000);
-    } catch (err) {
-      if (err.status !== 404) throw err;
-      res = await this.request(p.ip, p.port, 'POST', '/api/hello', { profile: this.publicProfile() }, 3500);
+    let usedIp = p.ip;
+    let lastErr;
+    for (const ip of ips) {
+      try {
+        res = await this.request(ip, p.port, 'POST', '/api/collect', { profile: this.publicProfile(), acks, peers: this.gossipPeers(p.id) }, 4000);
+        usedIp = ip;
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (err.status === 404) {
+          try {
+            res = await this.request(ip, p.port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers(p.id) }, 3500);
+            usedIp = ip;
+            lastErr = null;
+            break;
+          } catch (err2) {
+            lastErr = err2;
+          }
+        }
+      }
     }
+    if (!res) throw lastErr || new Error('Peer unreachable');
     if (acks.length) this.pendingAcks.delete(p.id);
-    if (res.profile) this.touchPeer(res.profile, p.ip, { manual: !!p.manual });
+    if (res.profile) this.touchPeer(res.profile, usedIp, { manual: !!p.manual });
+    this.ingestGossip(res.peers, usedIp);
     const events = Array.isArray(res.events) ? res.events : [];
     const got = [];
     for (const ev of events) {
@@ -471,6 +542,7 @@ class ChatEngine extends EventEmitter {
     if (res.profile?.id === this.me.id) throw new Error('That address is this computer.');
     const peer = this.touchPeer(res.profile, host, { manual: true });
     if (!peer) throw new Error('That computer uses a different workspace name.');
+    this.ingestGossip(res.peers, host);
     this.syncWithPeer(peer).catch(() => {});
     this.emitState();
     return peer;
@@ -480,9 +552,116 @@ class ChatEngine extends EventEmitter {
     delete this.peersFile.data[peerId];
     delete this.outboxFile.data[peerId];
     this.seen.delete(peerId);
+    this.notedJoins.delete(peerId);
     this.peersFile.save();
     this.outboxFile.save();
     this.emitState();
+  }
+
+  gossipPeers(exceptId) {
+    return this.peerList()
+      .filter((p) => p.online && p.ip && p.port && p.id !== exceptId)
+      .slice(0, 40)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        status: p.status,
+        ip: p.ip,
+        port: p.port,
+        ips: p.ips || [],
+        ver: p.appVersion,
+        ws: this.workspace,
+      }));
+  }
+
+  ingestGossip(list, viaIp) {
+    if (!Array.isArray(list)) return;
+    for (const hint of list) {
+      if (!hint || typeof hint.id !== 'string' || hint.id === this.me.id) continue;
+      if ((hint.ws || '') !== this.workspace) continue;
+      if (this.isOnline(hint.id)) continue;
+      const existing = this.peersFile.data[hint.id];
+      const ip = cleanIp(hint.ip) || viaIp;
+      const port = Number(hint.port) || this.preferredPort;
+      if (!ip || !port) continue;
+      if (existing?.ip === ip && existing?.port === port && this.helloBusy.has(hint.id)) continue;
+      this.helloPeer({ ...hint, ip, port, ips: hint.ips || existing?.ips || [] });
+    }
+  }
+
+  introducePeer(p) {
+    for (const other of Object.values(this.peersFile.data)) {
+      if (!other?.ip || other.id === p.id || other.id === this.me.id) continue;
+      this.helloPeer(other);
+    }
+  }
+
+  orderIps(list) {
+    return [...new Set((list || []).map(cleanIp).filter(isIpv4))].sort((a, b) => Number(reachableOn(b)) - Number(reachableOn(a)));
+  }
+
+  helloPeer(p) {
+    if (!p?.ip || p.id === this.me.id) return;
+    const key = p.id || `${p.ip}:${p.port}`;
+    if (this.helloBusy.has(key)) return;
+    this.helloBusy.add(key);
+    const tryHello = async () => {
+      const ips = this.orderIps([p.ip, ...(p.ips || [])]);
+      for (const ip of ips) {
+        try {
+          const res = await this.request(ip, p.port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers(p.id) }, 2500);
+          if (res.profile) {
+            this.touchPeer(res.profile, ip, { manual: !!p.manual });
+            this.ingestGossip(res.peers, ip);
+            return;
+          }
+        } catch {
+          // try next advertised address
+        }
+      }
+    };
+    tryHello()
+      .catch(() => {})
+      .finally(() => setTimeout(() => this.helloBusy.delete(key), 2000));
+  }
+
+  lanNeighborIps() {
+    const ips = [];
+    for (const iface of localAddresses()) ips.push(...hostsOnInterface(iface));
+    return [...new Set(ips)];
+  }
+
+  async probeLan() {
+    if (this.scanning || !this.enableDiscovery) return;
+    const targets = this.lanNeighborIps();
+    if (!targets.length) return;
+    this.scanning = true;
+    this.emit('log', `Scanning Wi-Fi and LAN for OfficeLink (${targets.length} addresses)`);
+    const ports = [...new Set([this.port, this.preferredPort, 45321, 45322])].filter(Boolean);
+    const concurrency = 48;
+    let next = 0;
+    const worker = async () => {
+      while (next < targets.length) {
+        const ip = targets[next++];
+        for (const port of ports) {
+          try {
+            const res = await this.request(ip, port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers() }, 500);
+            if (res.profile && res.profile.id !== this.me.id) {
+              this.touchPeer(res.profile, ip);
+              this.ingestGossip(res.peers, ip);
+            }
+          } catch {
+            // empty
+          }
+        }
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, () => worker()));
+    } finally {
+      this.scanning = false;
+    }
   }
 
   // --------------------------------------------------------------- transport
@@ -625,7 +804,8 @@ class ChatEngine extends EventEmitter {
     if (req.method === 'POST' && url.pathname === '/api/hello') {
       const body = await readJsonBody(req);
       this.touchPeer(body.profile, ip);
-      return sendJson(res, 200, { profile: this.publicProfile() });
+      this.ingestGossip(body.peers, ip);
+      return sendJson(res, 200, { profile: this.publicProfile(), peers: this.gossipPeers(body.profile?.id) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/collect') {
@@ -633,6 +813,7 @@ class ChatEngine extends EventEmitter {
       const from = body.profile || body.from;
       if (!from || typeof from.id !== 'string') return sendJson(res, 400, { error: 'Missing sender' });
       this.touchPeer(from, ip);
+      this.ingestGossip(body.peers, ip);
       const acked = new Set(Array.isArray(body.acks) ? body.acks : []);
       if (acked.size && this.outboxFile.data[from.id]) {
         const kept = this.outboxFile.data[from.id].filter((e) => !acked.has(e.eid));
@@ -649,7 +830,7 @@ class ChatEngine extends EventEmitter {
       }
       const events = (this.outboxFile.data[from.id] || []).slice(0, BATCH_SIZE);
       for (const e of events) this.lastCollected.set(`${from.id}:${e.eid}`, e);
-      return sendJson(res, 200, { profile: this.publicProfile(), events });
+      return sendJson(res, 200, { profile: this.publicProfile(), events, peers: this.gossipPeers(from.id) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/events') {
@@ -743,7 +924,7 @@ class ChatEngine extends EventEmitter {
 
   codePack() {
     const now = Date.now();
-    if (this._codePack && now - (this._codePackAt || 0) < 2000) return this._codePack;
+    if (this._codePack && now - (this._codePackAt || 0) < 30000) return this._codePack;
     try {
       this._codePack = collectSource(this.codeRoot);
     } catch (err) {
@@ -1477,7 +1658,7 @@ class ChatEngine extends EventEmitter {
       onboarded: !!this.config.data.onboarded,
       settings: { ...this.settings },
       port: this.port,
-      addresses: localAddresses().map((a) => a.address),
+      addresses: localAddresses().map((a) => ({ ip: a.address, name: a.name, kind: a.kind || ifaceKind(a.name) })),
       peers: this.peerList(),
       groups: Object.values(this.groupsFile.data).filter((g) => !g.left),
       pinned: [...(this.metaFile.data.pinned || [])],

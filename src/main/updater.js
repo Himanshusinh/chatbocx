@@ -69,7 +69,7 @@ class AppUpdater {
       gitOrigin(this.codeRoot) ||
       '';
     const parsed = parseRepoUrl(raw);
-    const branch = (this.engine.settings.updateBranch || '').trim() || parsed?.branch || 'master';
+    const branch = (this.engine.settings.updateBranch || '').trim() || parsed?.branch || 'main';
     if (!parsed) return raw ? { kind: 'git', clone: raw, branch } : null;
     return { ...parsed, branch: parsed.branch || branch };
   }
@@ -144,10 +144,11 @@ class AppUpdater {
       try {
         remoteSha = await githubCommitSha(repo.owner, repo.repo, repo.branch);
       } catch {
-        if (repo.branch === 'master') {
+        if (repo.branch === 'main' || repo.branch === 'master') {
+          const other = repo.branch === 'main' ? 'master' : 'main';
           try {
-            remoteSha = await githubCommitSha(repo.owner, repo.repo, 'main');
-            repo = { ...repo, branch: 'main' };
+            remoteSha = await githubCommitSha(repo.owner, repo.repo, other);
+            repo = { ...repo, branch: other };
           } catch {
             remoteSha = '';
           }
@@ -158,10 +159,11 @@ class AppUpdater {
       try {
         remoteSha = await gitRemoteSha(repo.clone, repo.branch);
       } catch {
-        if (repo.branch === 'master') {
+        if (repo.branch === 'main' || repo.branch === 'master') {
+          const other = repo.branch === 'main' ? 'master' : 'main';
           try {
-            remoteSha = await gitRemoteSha(repo.clone, 'main');
-            repo = { ...repo, branch: 'main' };
+            remoteSha = await gitRemoteSha(repo.clone, other);
+            repo = { ...repo, branch: other };
           } catch {
             remoteSha = '';
           }

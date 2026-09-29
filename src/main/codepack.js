@@ -300,15 +300,15 @@ function findPackageRoot(dir) {
 }
 
 async function fetchGithubPack(info, onProgress) {
-  const branch = info.branch || 'master';
+  const branch = info.branch || 'main';
   const url = `https://codeload.github.com/${info.owner}/${info.repo}/zip/refs/heads/${encodeURIComponent(branch)}`;
   onProgress?.({ message: 'Downloading latest code…' });
   let zip;
   try {
     zip = await downloadUrl(url);
   } catch (err) {
-    if (branch === 'master') {
-      return fetchGithubPack({ ...info, branch: 'main' }, onProgress);
+    if (branch === 'main') {
+      return fetchGithubPack({ ...info, branch: 'master' }, onProgress);
     }
     throw err;
   }

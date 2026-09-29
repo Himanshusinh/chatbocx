@@ -50,3 +50,27 @@ assert.strictEqual(tree.branch, 'develop');
 assert.strictEqual(parseRepoUrl(''), null);
 
 console.log('✓ code pack apply round-trip and git URL parsing');
+
+const {
+  onSameNetwork,
+  hostsOnInterface,
+  isVirtualIface,
+  ifaceKind,
+  isIpv4,
+} = require('../src/main/discovery');
+
+assert.strictEqual(isIpv4('192.168.1.20'), true);
+assert.strictEqual(onSameNetwork('192.168.1.50', '192.168.1.10', '255.255.255.0'), true);
+assert.strictEqual(onSameNetwork('192.168.0.50', '192.168.1.10', '255.255.255.0'), false);
+assert.strictEqual(isVirtualIface('vEthernet (WSL)'), true);
+assert.strictEqual(isVirtualIface('Ethernet'), false);
+assert.strictEqual(isVirtualIface('Wi-Fi'), false);
+assert.strictEqual(isVirtualIface('en0'), false);
+assert.strictEqual(ifaceKind('Wi-Fi'), 'Wi-Fi');
+assert.strictEqual(ifaceKind('Ethernet'), 'LAN');
+const hosts = hostsOnInterface({ address: '192.168.1.10', netmask: '255.255.255.0' });
+assert.strictEqual(hosts.length, 253);
+assert(!hosts.includes('192.168.1.10'));
+assert(hosts.includes('192.168.1.1'));
+assert(hosts.includes('192.168.1.20'));
+console.log('✓ Wi-Fi and LAN interface helpers');

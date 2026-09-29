@@ -45,7 +45,27 @@ async function sha256(file) {
   // Manual add in one direction is enough; the hello registers both sides.
   await alice.addPeerByAddress('127.0.0.1', bob.port);
   await waitFor(() => bob.isOnline(alice.me.id), 'bob sees alice');
+  await waitFor(
+    () => alice.getConv('general').some((m) => m.system && /bob joined/i.test(m.text)),
+    'alice sees bob joined'
+  );
+  await waitFor(
+    () => bob.getConv('general').some((m) => m.system && /alice joined/i.test(m.text)),
+    'bob sees alice joined'
+  );
   console.log('✓ peers connect by IP');
+
+  const carol = makeEngine('carol', 47201);
+  await carol.start();
+  await bob.addPeerByAddress('127.0.0.1', carol.port);
+  await waitFor(() => alice.isOnline(carol.me.id), 'alice learns carol via gossip');
+  await waitFor(() => carol.isOnline(alice.me.id), 'carol learns alice via gossip');
+  await waitFor(
+    () => alice.getConv('general').some((m) => m.system && /carol joined/i.test(m.text)),
+    'alice is told carol joined'
+  );
+  await carol.stop();
+  console.log('✓ a new device is introduced to everyone and shows as joined');
 
   // Direct message, delivery + read receipts
   const dm = dmId(alice.me.id, bob.me.id);

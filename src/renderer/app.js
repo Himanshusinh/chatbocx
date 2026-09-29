@@ -69,6 +69,9 @@ const S = {
 // ------------------------------------------------------------------ helpers
 
 const me = () => S.state.me;
+const netAddrs = (st = S.state) =>
+  (st?.addresses || []).map((a) => (typeof a === 'string' ? { ip: a, kind: '' } : a)).filter((a) => a && a.ip);
+const addrLabel = (a) => (a.kind && a.kind !== 'Network' ? `${a.kind} ${a.ip}` : a.ip);
 const peerById = (id) => S.state.peers.find((p) => p.id === id);
 const groupById = (id) => S.state.groups.find((g) => g.id === id);
 const dmId = (a, b) => `dm:${[a, b].sort().join(':')}`;
@@ -314,13 +317,13 @@ function renderSidebar() {
     });
   $('#conv-list').innerHTML = html;
 
-  const addrs = st.addresses;
+  const addrs = netAddrs(st);
   $('#net-status').innerHTML = addrs.length
-    ? `<span class="net-dot ok"></span><span title="Colleagues can add you with this address">${esc(addrs[0])}:${st.port}</span>`
+    ? `<span class="net-dot ok"></span><span title="${esc(addrs.map((a) => `${addrLabel(a)}:${st.port}`).join('\n'))}">${esc(addrs.map((a) => addrLabel(a)).join(' · '))}:${st.port}</span>`
     : `<span class="net-dot bad"></span><span>No network connection</span>`;
   const copyBtn = $('#copy-addr-btn');
   copyBtn.hidden = !addrs.length;
-  copyBtn.title = addrs.length ? `Copy ${addrs[0]}:${st.port}` : '';
+  copyBtn.title = addrs.length ? `Copy ${addrs.map((a) => `${a.ip}:${st.port}`).join(', ')}` : '';
 
   const unread = Object.values(st.convs).reduce((n, c) => n + (c.unread || 0), 0);
   document.title = unread ? `(${unread}) OfficeLink` : 'OfficeLink';
@@ -334,7 +337,7 @@ function renderHeader() {
     <button class="icon-btn no-drag ${isMuted(id) ? 'on' : ''}" data-head="mute" title="${isMuted(id) ? 'Unmute notifications' : 'Mute notifications'}">${isMuted(id) ? ICON.mute : ICON.unmute}</button>`;
   if (id === 'general') {
     const online = S.state.peers.filter((p) => p.online).length + 1;
-    subtitle = `${online} online · everyone on your network`;
+    subtitle = `${online} online · Wi-Fi and LAN`;
   } else if (id.startsWith('dm:')) {
     const p = peerById(peerOfDm(id));
     const st = peerStatus(p);
@@ -836,7 +839,11 @@ function showOnboarding() {
 function showSettings() {
   const st = S.state;
   let color = st.me.color;
-  const addrs = st.addresses.length ? st.addresses.map((a) => `<code>${esc(a)}:${st.port}</code>`).join(' ') : '<span class="err">Not connected</span>';
+  const addrs = netAddrs(st).length
+    ? netAddrs(st)
+        .map((a) => `<code>${esc(addrLabel(a))}:${st.port}</code>`)
+        .join(' ')
+    : '<span class="err">Not connected</span>';
   const { el, close } = openModal(
     `
     <div class="modal-head"><h3>Settings</h3><button class="icon-btn" data-close>${ICON.x}</button></div>
@@ -856,7 +863,7 @@ function showSettings() {
       <section>
         <h4>Network</h4>
         <div class="field"><span>Your address</span><div class="addr">${addrs}</div>
-          <small class="muted">Colleagues usually appear automatically. If your network blocks discovery, they can add you with this address using “Add by IP”.</small></div>
+          <small class="muted">Wi-Fi and cable (LAN) both work when they share the same office router. Colleagues usually appear automatically. If someone is missing, they can add you with any of these addresses using “Add by IP”.</small></div>
         <label class="field"><span>Workspace name <small class="muted">(optional)</small></span>
           <input id="st-ws" maxlength="40" value="${esc(st.settings.workspace)}" placeholder="Leave empty to see everyone on the network" />
           <small class="muted">Only people using the same workspace name can see each other. Useful to keep teams or departments separate on a shared network.</small></label>
@@ -898,7 +905,7 @@ function showSettings() {
           <input id="st-repo" value="${esc(st.settings.updateRepo || '')}" placeholder="https://github.com/you/officelink.git" />
           <small class="muted">If you set this, Update pulls the latest code from that repo. If you leave it empty, Update fetches new code from a colleague on this Wi-Fi.</small></label>
         <label class="field"><span>Branch</span>
-          <input id="st-branch" value="${esc(st.settings.updateBranch || 'master')}" placeholder="master" />
+          <input id="st-branch" value="${esc(st.settings.updateBranch || 'main')}" placeholder="main" />
         </label>
         <label class="check"><input type="checkbox" id="st-autoup" ${st.settings.autoUpdate ? 'checked' : ''} /> Check for new code in the background and show a banner</label>
         <p id="st-update-status" class="update-status muted">${esc((S.update && S.update.message) || '')}</p>
@@ -932,7 +939,7 @@ function showSettings() {
     try {
       await call('updateSettings', {
         updateRepo: $('#st-repo', el).value.trim(),
-        updateBranch: $('#st-branch', el).value.trim() || 'master',
+        updateBranch: $('#st-branch', el).value.trim() || 'main',
         autoUpdate: $('#st-autoup', el).checked,
       });
       await api.update('apply');
@@ -957,7 +964,7 @@ function showSettings() {
       notifications: $('#st-notify', el).checked,
       autoUpdate: $('#st-autoup', el).checked,
       updateRepo: $('#st-repo', el).value.trim(),
-      updateBranch: $('#st-branch', el).value.trim() || 'master',
+      updateBranch: $('#st-branch', el).value.trim() || 'main',
       ...($('#st-bg', el) ? { runInBackground: $('#st-bg', el).checked } : {}),
     });
     close();
@@ -1085,7 +1092,10 @@ function showPeerInfo(peerId) {
       <h2>${esc(p.name)}</h2>
       <dl>
         <dt>Status</dt><dd>${esc(peerStatus(p) === 'offline' ? `Offline · last seen ${fmtAgo(p.lastSeen)}` : peerStatus(p))}</dd>
-        <dt>Address</dt><dd><code>${esc(p.ip)}:${esc(p.port)}</code></dd>
+        <dt>Address</dt><dd>${[p.ip, ...(p.ips || [])]
+          .filter((ip, i, all) => ip && all.indexOf(ip) === i)
+          .map((ip) => `<code>${esc(ip)}:${esc(p.port)}</code>`)
+          .join('<br>')}</dd>
         <dt>Found via</dt><dd>${p.manual ? 'Added by IP address' : 'Automatic network discovery'}</dd>
       </dl>
     </div>
@@ -1102,9 +1112,9 @@ function showHelp() {
     `
     <div class="modal-head"><h3>How OfficeLink works</h3><button class="icon-btn" data-close>${ICON.x}</button></div>
     <div class="modal-body help-body">
-      <p>OfficeLink is a local office chat. It never uses the internet. Everyone installs the app on their Mac or Windows PC and stays on the same Wi-Fi or LAN.</p>
+      <p>OfficeLink is a local office chat. It never uses the internet. Everyone installs the app on their Mac or Windows PC. It works over <b>Wi-Fi and LAN (ethernet cable)</b> as long as the computers share the same office router.</p>
       <h4>Find colleagues</h4>
-      <p>People usually appear automatically. If they do not (some office Wi-Fi blocks discovery), copy the address at the bottom left and send it to them — they tap <b>Add by IP</b>.</p>
+      <p>People on Wi-Fi and people plugged into the router appear automatically, and #general shows when someone new joins. If someone is missing, copy the address at the bottom left and send it to them — they tap <b>Add by IP</b>.</p>
       <h4>Mac: allow local network</h4>
       <p>On a Mac, open <b>System Settings → Privacy &amp; Security → Local Network</b> and turn <b>OfficeLink</b> on. If a firewall prompt appears, choose <b>Allow</b>. Without that, names and messages from Windows PCs will not update.</p>
       <h4>Share large files</h4>
@@ -1348,8 +1358,9 @@ function wireUi() {
   $('#copy-addr-btn').addEventListener('click', async () => {
     const st = S.state;
     if (!st?.addresses?.length) return;
-    await api.copyText(`${st.addresses[0]}:${st.port}`);
-    toast('Address copied — send it to a colleague to Add by IP', 'success');
+    const lines = netAddrs(st).map((a) => `${a.ip}:${st.port}`).join('\n');
+    await api.copyText(lines);
+    toast(netAddrs(st).length > 1 ? 'Wi-Fi and LAN addresses copied' : 'Address copied — send it to a colleague to Add by IP', 'success');
   });
   $('#add-peer-btn').addEventListener('click', showAddPeer);
   $('#new-group-btn').addEventListener('click', () => showGroupModal(null));
