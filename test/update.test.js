@@ -74,3 +74,20 @@ assert(!hosts.includes('192.168.1.10'));
 assert(hosts.includes('192.168.1.1'));
 assert(hosts.includes('192.168.1.20'));
 console.log('✓ Wi-Fi and LAN interface helpers');
+
+// Regression: gitHead/gitOrigin returned '' for every repo, so after an update
+// installed with git the app never recognised it and kept offering "Update".
+{
+  const { execFileSync } = require('child_process');
+  const { gitHead: head } = require('../src/main/codepack');
+  const root = require('path').join(__dirname, '..');
+  let expected = '';
+  try {
+    expected = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  } catch {
+    // not a git checkout (e.g. a source zip)
+  }
+  if (expected) assert.strictEqual(head(root), expected, 'gitHead reads the current commit');
+  assert.strictEqual(head(require('os').tmpdir()), '', 'gitHead is empty outside a repo');
+  console.log('✓ git commit detection');
+}

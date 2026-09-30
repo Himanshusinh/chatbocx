@@ -164,12 +164,14 @@ function parseRepoUrl(raw) {
 
 function gitOrigin(cwd) {
   try {
-    const { stdout } = require('child_process').execFileSync('git', ['remote', 'get-url', 'origin'], {
+    // execFileSync returns stdout itself (a string), not { stdout }.
+    const out = require('child_process').execFileSync('git', ['remote', 'get-url', 'origin'], {
       cwd,
       encoding: 'utf8',
       timeout: 4000,
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
-    return String(stdout || '').trim();
+    return String(out || '').trim();
   } catch {
     return '';
   }
@@ -177,12 +179,14 @@ function gitOrigin(cwd) {
 
 function gitHead(cwd) {
   try {
-    const { stdout } = require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], {
+    // execFileSync returns stdout itself (a string), not { stdout }.
+    const out = require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd,
       encoding: 'utf8',
       timeout: 4000,
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
-    return String(stdout || '').trim();
+    return String(out || '').trim();
   } catch {
     return '';
   }
