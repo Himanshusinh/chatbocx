@@ -37,7 +37,13 @@ const ICON = {
   forward: svg('<polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/>'),
   copyAddr: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
   help: svg('<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
+  more: svg('<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>'),
+  compose: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>'),
+  alert: svg('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
+  check: svg('<polyline points="20 6 9 17 4 12"/>'),
+  eraser: svg('<path d="M20 20H7L3 16a2 2 0 0 1 0-2.83l10-10a2 2 0 0 1 2.83 0l5 5a2 2 0 0 1 0 2.83L13 19"/>'),
 };
+const CLOCK = '<svg viewBox="0 0 16 16" width="13" height="13"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.6V8l2.2 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
 const TICK_ONE = '<svg viewBox="0 0 16 11" width="16" height="11"><path d="M1 6l3.5 3.5L11 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const TICK_TWO = '<svg viewBox="0 0 20 11" width="20" height="11"><path d="M1 6l3.5 3.5L11 2M8 8.5l1 1L16 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
@@ -65,7 +71,18 @@ const S = {
   focused: true,
   lastTypingSent: 0,
   update: null,
+  tab: 'all',
+  tests: new Map(),
 };
+
+/** Only touches the DOM when the markup really changed. Rewriting the sidebar
+ * every few seconds ate clicks and made the list flicker. */
+function setHtml(el, html) {
+  if (!el || el._html === html) return false;
+  el.innerHTML = html;
+  el._html = html;
+  return true;
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -163,7 +180,26 @@ function fileKind(name) {
   return { label: name.includes('.') ? ext : 'FILE', color: '#64748b' };
 }
 
+// formatText builds a regex per known person for @mentions; re-rendering a
+// chat ran that for every message. Cache per text, reset when names change.
+const formatCache = new Map();
+let formatCacheKey = '';
+
 function formatText(raw) {
+  const key = S.state ? [me().name, ...S.state.peers.map((p) => p.name)].join('\u0001') : '';
+  if (key !== formatCacheKey) {
+    formatCache.clear();
+    formatCacheKey = key;
+  }
+  const hit = formatCache.get(raw);
+  if (hit !== undefined) return hit;
+  const html = formatTextUncached(raw);
+  if (formatCache.size > 2000) formatCache.clear();
+  formatCache.set(raw, html);
+  return html;
+}
+
+function formatTextUncached(raw) {
   const tokens = [];
   const hold = (html) => `\u0000${tokens.push(html) - 1}\u0000`;
   let s = esc(raw);
@@ -207,34 +243,33 @@ async function call(method, ...args) {
 }
 
 function paintFindUsersBtn() {
-  const btn = $('#find-users-btn');
+  const btn = $('#nw-find');
   if (!btn) return;
   const busy = S.finding || !!S.state?.findingUsers;
   btn.disabled = busy;
-  btn.classList.toggle('busy', busy);
-  btn.innerHTML = busy ? `${ICON.retry}<span>Finding people…</span>` : `${ICON.wifi}<span>Find users</span>`;
+  btn.innerHTML = busy ? `${ICON.retry}<span>Searching…</span>` : `${ICON.wifi}<span>Find people</span>`;
 }
 
 async function findUsers() {
   if (S.finding) return;
   S.finding = true;
   paintFindUsersBtn();
-  toast('Scanning Wi-Fi and LAN for colleagues…');
+  toast('Looking for colleagues on Wi-Fi and LAN…');
   try {
     const res = await call('findUsers');
-    S.finding = false;
-    paintFindUsersBtn();
     if (res?.added) {
       const names = (res.names || []).filter(Boolean);
       toast(names.length ? `Found ${names.join(', ')}` : `Found ${res.added} new colleague${res.added === 1 ? '' : 's'}`, 'success');
     } else if (res?.online) {
       toast(`${res.online} colleague${res.online === 1 ? '' : 's'} online`, 'success');
     } else if (S.state?.platform === 'darwin') {
-      toast('Nobody new yet. Turn on Local Network for OfficeLink, then try Find users again.');
+      toast('Nobody found yet. Check that Local Network is on for OfficeLink in System Settings.');
     } else {
-      toast('Nobody new on this network yet. Make sure OfficeLink is open on their computer.');
+      toast('Nobody found yet. Make sure OfficeLink is open on their computer.');
     }
   } catch {
+    // toast already shown
+  } finally {
     S.finding = false;
     paintFindUsersBtn();
   }
@@ -289,18 +324,23 @@ function isMuted(convId) {
 function renderSidebar() {
   const st = S.state;
   const status = st.me.status || 'online';
-  $('#me-btn').innerHTML = `${avatar(st.me.name, st.me.color, { size: 34, status })}
-    <span class="me-text"><span class="me-name">${esc(st.me.name)}</span><span class="me-status">${esc(status === 'busy' ? 'Do not disturb' : status === 'away' ? 'Away' : 'Available')}</span></span>`;
+  setHtml(
+    $('#me-btn'),
+    `${avatar(st.me.name, st.me.color, { size: 34, status })}
+    <span class="me-text"><span class="me-name">${esc(st.me.name)}</span><span class="me-status">${esc(status === 'busy' ? 'Do not disturb' : status === 'away' ? 'Away' : 'Available')}</span></span>`
+  );
 
   const f = S.filter.trim().toLowerCase();
-  const match = (name) => !f || name.toLowerCase().includes(f);
+  const match = (name) => !f || String(name).toLowerCase().includes(f);
   const activity = (id) => st.convs[id]?.lastActivity || 0;
+  const hasHistory = (id) => !!st.convs[id]?.last;
 
   const item = (convId, name, preview, extraClass = '') => {
     const c = st.convs[convId] || {};
     const typing = typingNames(convId);
     const previewHtml = typing.length ? `<span class="typing-preview">typing…</span>` : esc(preview);
-    const flags = `${isMuted(convId) ? `<span class="conv-flag" title="Muted">${ICON.mute}</span>` : ''}${isPinned(convId) ? `<span class="conv-flag" title="Pinned">${ICON.pin}</span>` : ''}`;
+    const peer = convId.startsWith('dm:') ? peerById(peerOfDm(convId)) : null;
+    const flags = `${peer?.waiting ? `<span class="conv-flag warn" title="${peer.waiting} waiting to be delivered">${CLOCK}</span>` : ''}${isMuted(convId) ? `<span class="conv-flag" title="Muted">${ICON.mute}</span>` : ''}${isPinned(convId) ? `<span class="conv-flag" title="Pinned">${ICON.pin}</span>` : ''}`;
     return `<button class="conv-item ${convId === S.active ? 'active' : ''} ${c.unread ? 'unread' : ''} ${extraClass}" data-conv="${esc(convId)}">
       ${convIcon(convId, 36)}
       <span class="conv-text">
@@ -316,97 +356,136 @@ function renderSidebar() {
     const who = last.from === st.me.id ? 'You: ' : convId.startsWith('dm:') ? '' : `${nameOf(last.from).split(' ')[0]}: `;
     return who + last.text;
   };
+  const peerLine = (p) =>
+    p.online ? (p.status === 'busy' ? 'Do not disturb' : p.status === 'away' ? 'Away' : 'Online') : `Last seen ${fmtAgo(p.lastSeen)}`;
 
   const onlineCount = st.peers.filter((p) => p.online).length;
-  let html = '';
-  const pinned = (st.pinned || []).filter((id) => convExists(id) && match(convTitle(id)));
-  if (pinned.length) {
-    html += '<div class="section-title">Pinned</div>';
-    for (const id of pinned) {
-      const name = id === 'general' ? '# general' : convTitle(id);
-      html += item(id, name, preview(id, id === 'general' ? `Everyone · ${onlineCount + 1} online` : ''), 'pinned');
-    }
-  }
-  html += '<div class="section-title">Channels</div>';
-  const skip = new Set(pinned);
-  if (match('general') && !skip.has('general')) html += item('general', '# general', preview('general', `Everyone · ${onlineCount + 1} online`));
-  const groups = st.groups.filter((g) => match(g.name) && !skip.has(g.id)).sort((a, b) => activity(b.id) - activity(a.id));
-  for (const g of groups) html += item(g.id, g.name, preview(g.id, `${g.members.length} members`));
+  const entries = [{ id: 'general', name: '# general', kind: 'group', fallback: `Everyone · ${onlineCount + 1} online` }];
+  for (const g of st.groups) entries.push({ id: g.id, name: g.name, kind: 'group', fallback: `${g.members.length} members` });
+  for (const p of st.peers) entries.push({ id: dmId(st.me.id, p.id), name: p.name, kind: 'person', peer: p, fallback: peerLine(p) });
 
-  const peers = st.peers.filter((p) => match(p.name));
-  html += `<div class="section-title">Direct messages <span class="section-count">${onlineCount} online</span></div>`;
-  if (!st.peers.length) {
-    const macHint = st.platform === 'darwin' && (st.lookingForPeers || (st.uptimeMs || 0) > 2500);
+  const tab = S.tab;
+  const visible = entries.filter((e) => {
+    if (!match(e.name)) return false;
+    if (tab === 'unread') return (st.convs[e.id]?.unread || 0) > 0;
+    if (tab === 'people') return e.kind === 'person';
+    if (tab === 'groups') return e.kind === 'group';
+    return true;
+  });
+  const row = (e) => item(e.id, e.name, preview(e.id, e.fallback), e.peer && !e.peer.online ? 'offline' : '');
+  const byActivity = (a, b) => activity(b.id) - activity(a.id) || a.name.localeCompare(b.name);
+
+  let html = '';
+  const pinned = visible.filter((e) => isPinned(e.id));
+  const rest = visible.filter((e) => !isPinned(e.id));
+  if (tab === 'unread' && visible.length) html += '<button class="list-action" data-list="read-all">Mark all as read</button>';
+  if (pinned.length) html += `<div class="section-title">Pinned</div>${pinned.sort(byActivity).map(row).join('')}`;
+  const chats = rest.filter((e) => e.kind === 'group' || hasHistory(e.id)).sort(byActivity);
+  const people = rest
+    .filter((e) => e.kind === 'person' && !hasHistory(e.id))
+    .sort((a, b) => Number(b.peer.online) - Number(a.peer.online) || a.name.localeCompare(b.name));
+  if (chats.length) html += `${pinned.length ? '<div class="section-title">Chats</div>' : ''}${chats.map(row).join('')}`;
+  if (people.length) html += `<div class="section-title">People <span class="section-count">${onlineCount} online</span></div>${people.map(row).join('')}`;
+
+  if (!visible.length) {
+    html += `<div class="empty-list muted">${
+      f ? 'No matches' : tab === 'unread' ? 'You are all caught up' : tab === 'groups' ? 'No groups yet' : 'Nobody here yet'
+    }</div>`;
+  }
+  if (!st.peers.length && tab !== 'groups') {
+    const mac = st.platform === 'darwin';
     html += `<div class="empty-peers">
       <div>${ICON.wifi}</div>
       <p>Looking for colleagues on your network…</p>
-      <p class="muted">${
-        macHint
-          ? 'Tap Find users above to scan the office network. OfficeLink must also be allowed to use the local network.'
-          : 'Tap Find users above, or wait — anyone running OfficeLink on the same Wi-Fi or LAN shows up here.'
-      }</p>
-      ${
-        macHint
-          ? `<button type="button" class="primary-btn" id="mac-privacy-btn">Allow local network</button>
-             <p class="muted">System Settings → Privacy &amp; Security → Local Network → turn OfficeLink on. If macOS asks to accept incoming connections, click Allow. Then quit OfficeLink and open it again.</p>`
-          : ''
-      }
+      <p class="muted">Anyone running OfficeLink on the same Wi-Fi or office LAN shows up here.${mac ? ' On a Mac, OfficeLink needs Local Network access.' : ''}</p>
+      <button type="button" class="ghost-btn" data-list="network">${ICON.wifi}<span>Connection &amp; people</span></button>
     </div>`;
   }
-  peers
-    .map((p) => ({ p, id: dmId(st.me.id, p.id) }))
-    .filter(({ id }) => !skip.has(id))
-    .sort((a, b) => activity(b.id) - activity(a.id) || Number(b.p.online) - Number(a.p.online) || a.p.name.localeCompare(b.p.name))
-    .forEach(({ p, id }) => {
-      const fallback = p.online ? (p.status === 'busy' ? 'Do not disturb' : p.status === 'away' ? 'Away' : 'Online') : `Last seen ${fmtAgo(p.lastSeen)}`;
-      html += item(id, p.name, preview(id, fallback), p.online ? '' : 'offline');
-    });
-  $('#conv-list').innerHTML = html;
-
-  const addrs = netAddrs(st);
-  $('#net-status').innerHTML = addrs.length
-    ? `<span class="net-dot ok"></span><span title="${esc(addrs.map((a) => `${addrLabel(a)}:${st.port}`).join('\n'))}">${esc(addrs.map((a) => addrLabel(a)).join(' · '))}:${st.port}</span>`
-    : `<span class="net-dot bad"></span><span>No network connection</span>`;
-  const copyBtn = $('#copy-addr-btn');
-  copyBtn.hidden = !addrs.length;
-  copyBtn.title = addrs.length ? `Copy ${addrs.map((a) => `${a.ip}:${st.port}`).join(', ')}` : '';
+  setHtml($('#conv-list'), html);
+  renderNetButton();
 
   const unread = Object.values(st.convs).reduce((n, c) => n + (c.unread || 0), 0);
   document.title = unread ? `(${unread}) OfficeLink` : 'OfficeLink';
+  document.querySelectorAll('#side-tabs [data-tab]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.tab === S.tab);
+    if (b.dataset.tab === 'unread') b.textContent = unread ? `Unread ${unread > 99 ? '99+' : unread}` : 'Unread';
+  });
   paintFindUsersBtn();
+}
+
+function renderNetButton() {
+  const st = S.state;
+  const addrs = netAddrs(st);
+  const online = st.peers.filter((p) => p.online).length;
+  let dot = 'ok';
+  let text = `${online} online · ${addrs.length ? addrs.map((a) => a.ip).join(', ') : ''}`;
+  if (!addrs.length) {
+    dot = 'bad';
+    text = 'No network connection';
+  } else if (st.localNetworkBlocked) {
+    dot = 'bad';
+    text = 'macOS is blocking the network';
+  } else if (st.waiting) {
+    dot = 'warn';
+    text = `${st.waiting} message${st.waiting === 1 ? '' : 's'} waiting to send`;
+  }
+  setHtml($('#net-btn'), `<span class="net-dot ${dot}"></span><span class="net-text">${esc(text)}</span>${ICON.down}`);
+}
+
+/** Explains, right above the chat, why messages are not going out. */
+function renderAlert() {
+  const st = S.state;
+  const el = $('#alert-banner');
+  let html = '';
+  if (st.localNetworkBlocked) {
+    html = `${ICON.alert}<span><b>macOS is blocking OfficeLink from reaching other computers.</b> Turn on OfficeLink in System Settings → Privacy &amp; Security → Local Network, then reopen the app.</span>
+      <span class="grow"></span><button class="primary-btn small" data-alert="mac">Open Settings</button>`;
+  } else if (S.active.startsWith('dm:')) {
+    const p = peerById(peerOfDm(S.active));
+    if (p?.waiting) {
+      const why = p.reach && !p.reach.ok ? p.reach.error : p.online ? 'Sending…' : `${p.name} seems to be offline`;
+      html = `${CLOCK}<span><b>${p.waiting} message${p.waiting === 1 ? '' : 's'} not delivered yet.</b> ${esc(why)}. They are sent automatically when ${esc(p.name)} is reachable.</span>
+        <span class="grow"></span><button class="ghost-btn small" data-alert="test">Test connection</button><button class="primary-btn small" data-alert="retry">Retry now</button>`;
+    }
+  }
+  el.hidden = !html;
+  el.classList.toggle('danger', !!st.localNetworkBlocked);
+  setHtml(el, html);
 }
 
 function renderHeader() {
   const id = S.active;
   let subtitle = '';
-  let actions = `<button class="icon-btn no-drag" data-head="search" title="Search in chat (Ctrl/Cmd+F)">${ICON.search}</button>
-    <button class="icon-btn no-drag ${isPinned(id) ? 'on' : ''}" data-head="pin" title="${isPinned(id) ? 'Unpin chat' : 'Pin chat'}">${ICON.pin}</button>
-    <button class="icon-btn no-drag ${isMuted(id) ? 'on' : ''}" data-head="mute" title="${isMuted(id) ? 'Unmute notifications' : 'Mute notifications'}">${isMuted(id) ? ICON.mute : ICON.unmute}</button>`;
   if (id === 'general') {
     const online = S.state.peers.filter((p) => p.online).length + 1;
-    subtitle = `${online} online · Wi-Fi and LAN`;
+    subtitle = `${online} online · everyone on this network`;
   } else if (id.startsWith('dm:')) {
     const p = peerById(peerOfDm(id));
     const st = peerStatus(p);
     subtitle =
       st === 'offline' ? `Offline · last seen ${fmtAgo(p?.lastSeen)}` : st === 'busy' ? 'Do not disturb' : st === 'away' ? 'Away' : 'Online';
     if (p?.ip) subtitle += ` · ${p.ip}`;
-    actions += `<button class="icon-btn no-drag" data-head="peer-info" title="Details">${ICON.info}</button>`;
   } else {
     const g = groupById(id);
     subtitle = g ? g.members.map(nameOf).join(', ') : '';
-    actions += `<button class="icon-btn no-drag" data-head="group" title="Group settings">${ICON.users}</button>`;
   }
   const typing = typingNames(id);
   if (typing.length) subtitle = `<span class="typing-preview">${esc(typing.join(', '))} typing…</span>`;
   else subtitle = esc(subtitle);
-  $('#chat-head').innerHTML = `
-    <div class="head-info">${convIcon(id, 38)}
-      <div class="head-text"><div class="head-title">${esc(id === 'general' ? '# general' : convTitle(id))}</div><div class="head-sub">${subtitle}</div></div>
+  const flags = `${isPinned(id) ? `<span class="head-flag" title="Pinned">${ICON.pin}</span>` : ''}${isMuted(id) ? `<span class="head-flag" title="Muted">${ICON.mute}</span>` : ''}`;
+  setHtml(
+    $('#chat-head'),
+    `<div class="head-info">${convIcon(id, 38)}
+      <div class="head-text"><div class="head-title">${esc(id === 'general' ? '# general' : convTitle(id))}${flags}</div><div class="head-sub">${subtitle}</div></div>
     </div>
-    <div class="head-actions">${actions}</div>`;
+    <div class="head-actions">
+      <button class="icon-btn no-drag" data-head="search" title="Search in chat (Ctrl/Cmd+F)">${ICON.search}</button>
+      <button class="icon-btn no-drag" data-head="more" title="More">${ICON.more}</button>
+    </div>`
+  );
   $('#input').placeholder = `Message ${id === 'general' ? '#general' : convTitle(id)}`;
   $('#drop-sub').textContent = `Files go straight to ${id === 'general' ? 'everyone in #general' : convTitle(id)} — any size`;
+  renderAlert();
 }
 
 function renderTyping() {
@@ -426,6 +505,9 @@ function ticks(m) {
   const recips = recipientsCount(m.convId);
   const d = (m.deliveredTo || []).length;
   const r = (m.readBy || []).length;
+  if (m.waiting && !d) {
+    return `<span class="ticks waiting" title="Not delivered yet — sent automatically when they are reachable">${CLOCK}</span>`;
+  }
   const title = recips ? `Delivered to ${d} of ${recips} · Read by ${r}` : 'Sent';
   let cls = 'sent';
   let icon = TICK_ONE;
@@ -578,7 +660,7 @@ function renderMessages(mode) {
     html += messageHtml(m, grouped);
     prev = m;
   }
-  box.innerHTML = html;
+  setHtml(box, html);
   if (mode === 'bottom' || (mode !== 'prepend' && S.stickBottom)) {
     box.scrollTop = box.scrollHeight;
     S.stickBottom = true;
@@ -1143,10 +1225,17 @@ function showPeerInfo(peerId) {
           .filter((ip, i, all) => ip && all.indexOf(ip) === i)
           .map((ip) => `<code>${esc(ip)}:${esc(p.port)}</code>`)
           .join('<br>')}</dd>
+        <dt>Connection</dt><dd>${esc(peerReachText(p).text)}</dd>
+        ${p.waiting ? `<dt>Waiting</dt><dd>${p.waiting} message${p.waiting === 1 ? '' : 's'} not delivered yet</dd>` : ''}
+        <dt>App version</dt><dd>${esc(p.appVersion || 'unknown')}</dd>
         <dt>Found via</dt><dd>${p.manual ? 'Added by IP address' : 'Automatic network discovery'}</dd>
       </dl>
     </div>
-    <div class="modal-actions">${p.online ? '' : '<button class="danger-btn" id="pi-forget">Remove from list</button><span class="grow"></span>'}<button class="primary-btn" data-close>Close</button></div>`);
+    <div class="modal-actions">${p.online ? '' : '<button class="danger-btn" id="pi-forget">Remove from list</button>'}<span class="grow"></span><button class="ghost-btn" id="pi-test">${ICON.wifi}<span>Test connection</span></button><button class="primary-btn" data-close>Close</button></div>`);
+  $('#pi-test', el).addEventListener('click', () => {
+    close();
+    testConnection(p.id);
+  });
   $('#pi-forget', el)?.addEventListener('click', async () => {
     await call('removePeer', p.id);
     close();
@@ -1161,7 +1250,7 @@ function showHelp() {
     <div class="modal-body help-body">
       <p>OfficeLink is a local office chat. It never uses the internet. Everyone installs the app on their Mac or Windows PC. It works over <b>Wi-Fi and LAN (ethernet cable)</b> as long as the computers share the same office router.</p>
       <h4>Find colleagues</h4>
-      <p>People on Wi-Fi and people plugged into the router appear automatically, and #general shows when someone new joins. If someone is missing, copy the address at the bottom left and send it to them — they tap <b>Add by IP</b>.</p>
+      <p>People on Wi-Fi and people plugged into the router appear automatically, and #general shows when someone new joins. If someone is missing, open <b>Connection &amp; people</b> at the bottom left, copy your address and send it to them — they use <b>New → Add someone by IP address</b>.</p>
       <h4>Mac: allow local network</h4>
       <p>On a Mac, open <b>System Settings → Privacy &amp; Security → Local Network</b> and turn <b>OfficeLink</b> on. Quit and reopen the app after that. If a firewall prompt appears, choose <b>Allow</b>. Without those, Windows PCs will chat with each other but will not show up on the Mac.</p>
       <h4>Share large files</h4>
@@ -1180,8 +1269,11 @@ function showHelp() {
       <h4>Updates</h4>
       <p>Open <b>Settings</b> and click <b>Update</b>. OfficeLink fetches the latest code and restarts.</p>
       <p>The usual pipeline: change the code on your computer, <b>git push</b> to the repository URL in Settings, then everyone else clicks Update. If you have not set a git URL, Update copies the new code over Wi-Fi from a colleague who already has it (keep OfficeLink open on that computer).</p>
+      <h4>Messages that don't arrive</h4>
+      <p>A <b>clock</b> next to your message means it is queued: the other computer did not answer yet. It is sent automatically as soon as it does. Open <b>Connection &amp; people</b> (bottom left) and click <b>Test</b> next to the person to see why — for example a firewall, the PC being asleep, or OfficeLink being closed there.</p>
       <h4>Shortcuts</h4>
-      <p><b>Enter</b> send · <b>Shift+Enter</b> new line · <b>Ctrl/Cmd+F</b> search this chat · <b>Ctrl/Cmd+K</b> find people · <b>↑</b> edit last message</p>
+      <p><b>Enter</b> send · <b>Shift+Enter</b> new line · <b>Ctrl/Cmd+F</b> search this chat · <b>Ctrl/Cmd+K</b> search chats · <b>↑</b> edit last message · drag files anywhere to share</p>
+      <p>Formatting: <code>*bold*</code> <code>_italic_</code> <code>~strike~</code> <code>\`code\`</code></p>
     </div>
     <div class="modal-actions"><button class="primary-btn" data-close>Got it</button></div>`,
     { wide: true }
@@ -1228,24 +1320,201 @@ function showForward(m) {
   });
 }
 
-function showConvMenu(anchor, convId) {
-  const pinLabel = isPinned(convId) ? 'Unpin chat' : 'Pin chat';
-  const muteLabel = isMuted(convId) ? 'Unmute notifications' : 'Mute notifications';
+function showChatMenu(anchor, convId, { align = 'bottom' } = {}) {
+  const isDm = convId.startsWith('dm:');
+  const isGroup = convId.startsWith('group:');
+  const item = (act, icon, label, cls = '') => `<button class="menu-item ${cls}" data-act="${act}">${icon}<span>${label}</span></button>`;
+  const html = `<div class="menu">
+      ${item('pin', ICON.pin, isPinned(convId) ? 'Unpin chat' : 'Pin to top')}
+      ${item('mute', isMuted(convId) ? ICON.unmute : ICON.mute, isMuted(convId) ? 'Unmute notifications' : 'Mute notifications')}
+      ${isDm ? item('info', ICON.info, 'Contact details') : ''}
+      ${isDm ? item('test', ICON.wifi, 'Test connection') : ''}
+      ${isGroup ? item('group', ICON.users, 'Group members & name') : ''}
+      <div class="menu-sep"></div>
+      ${item('clear', ICON.eraser, 'Clear chat on this computer', 'danger')}
+    </div>`;
+  showPopover(
+    anchor,
+    html,
+    (e) => {
+      const b = e.target.closest('[data-act]');
+      if (!b) return;
+      closePopover();
+      const act = b.dataset.act;
+      if (act === 'pin') call('togglePin', convId);
+      if (act === 'mute') call('toggleMute', convId);
+      if (act === 'info') showPeerInfo(peerOfDm(convId));
+      if (act === 'test') testConnection(peerOfDm(convId));
+      if (act === 'group') showGroupModal(convId);
+      if (act === 'clear') clearChat(convId);
+    },
+    { align }
+  );
+}
+
+function showNewMenu(anchor) {
   showPopover(
     anchor,
     `<div class="menu">
-      <button class="menu-item" data-act="pin">${ICON.pin}<span>${pinLabel}</span></button>
-      <button class="menu-item" data-act="mute">${isMuted(convId) ? ICON.unmute : ICON.mute}<span>${muteLabel}</span></button>
+      <button class="menu-item" data-act="group">${ICON.groupAdd}<span>New group</span></button>
+      <button class="menu-item" data-act="ip">${ICON.plus}<span>Add someone by IP address</span></button>
+      <button class="menu-item" data-act="find">${ICON.wifi}<span>Find people on the network</span></button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" data-act="network">${ICON.info}<span>Connection &amp; people…</span></button>
+      <button class="menu-item" data-act="help">${ICON.help}<span>How OfficeLink works</span></button>
     </div>`,
     (e) => {
       const b = e.target.closest('[data-act]');
       if (!b) return;
       closePopover();
-      if (b.dataset.act === 'pin') call('togglePin', convId);
-      if (b.dataset.act === 'mute') call('toggleMute', convId);
+      const act = b.dataset.act;
+      if (act === 'group') showGroupModal(null);
+      if (act === 'ip') showAddPeer();
+      if (act === 'find') findUsers();
+      if (act === 'network') showNetwork();
+      if (act === 'help') showHelp();
     },
     { align: 'bottom' }
   );
+}
+
+async function clearChat(convId) {
+  const name = convId === 'general' ? '#general' : convTitle(convId);
+  if (!confirm(`Clear all messages in ${name} on this computer?\n\nOther people keep their copy.`)) return;
+  await call('clearConversation', convId);
+  toast('Chat cleared', 'success');
+}
+
+async function testConnection(peerId) {
+  const p = peerById(peerId);
+  if (!p) return;
+  toast(`Testing connection to ${p.name}…`);
+  try {
+    const res = await call('testPeer', peerId);
+    S.tests.set(peerId, res);
+    if (res.ok) {
+      toast(res.waiting ? `${p.name} is reachable. ${res.waiting} message(s) still waiting.` : `${p.name} is reachable — messages are delivered.`, 'success');
+    } else {
+      const why = res.results.map((r) => `${r.ip}: ${r.error}`).join('\n');
+      toast(`Cannot reach ${p.name}. ${res.results[0]?.error || ''}`, 'error');
+      if (!$('#nw-list')) showNetwork();
+      console.warn(why);
+    }
+    renderNetworkList();
+  } catch {
+    // toast already shown
+  }
+}
+
+function peerReachText(p) {
+  const test = S.tests.get(p.id);
+  if (test && !test.ok) return { cls: 'err', text: test.results.map((r) => `${r.ip} — ${r.error}`).join(' · ') || 'No address known' };
+  if (p.reach && !p.reach.ok && !p.online) return { cls: 'err', text: p.reach.error };
+  if (p.online) return { cls: 'ok', text: `Connected · ${p.ip}${test?.ok ? ` · ${Math.min(...test.results.filter((r) => r.ok).map((r) => r.ms))} ms` : ''}` };
+  return { cls: 'muted', text: `Offline · last seen ${fmtAgo(p.lastSeen)}` };
+}
+
+function renderNetworkList() {
+  const box = $('#nw-list');
+  if (!box) return;
+  const st = S.state;
+  const rows = [...st.peers]
+    .sort((a, b) => Number(b.online) - Number(a.online) || (b.waiting || 0) - (a.waiting || 0) || a.name.localeCompare(b.name))
+    .map((p) => {
+      const r = peerReachText(p);
+      return `<div class="nw-row" data-peer="${esc(p.id)}">
+        ${avatar(p.name, p.color, { size: 32, status: peerStatus(p) })}
+        <div class="nw-text"><b>${esc(p.name)}</b><span class="${r.cls}">${esc(r.text)}</span></div>
+        ${p.waiting ? `<span class="chip warn" title="Messages waiting to be delivered">${CLOCK} ${p.waiting}</span>` : ''}
+        <button class="ghost-btn small" data-nw="test">Test</button>
+        <button class="ghost-btn small" data-nw="chat">Chat</button>
+      </div>`;
+    })
+    .join('');
+  setHtml(box, rows || '<p class="muted">Nobody found yet. Click <b>Find people</b>, or add someone by IP address.</p>');
+  const addrs = netAddrs(st);
+  setHtml(
+    $('#nw-status'),
+    `<div class="nw-card ${addrs.length ? 'ok' : 'bad'}">
+      <span class="net-dot ${addrs.length ? 'ok' : 'bad'}"></span>
+      <div class="nw-text"><b>${addrs.length ? 'This computer' : 'Not connected to a network'}</b>
+        <span>${addrs.map((a) => `<code>${esc(addrLabel(a))}:${st.port}</code>`).join(' ') || 'Connect to the office Wi-Fi or LAN'}</span></div>
+      ${addrs.length ? `<button class="ghost-btn small" data-nw="copy">${ICON.copy}<span>Copy</span></button>` : ''}
+    </div>
+    ${
+      st.localNetworkBlocked
+        ? `<div class="nw-card bad">${ICON.alert}<div class="nw-text"><b>macOS is blocking OfficeLink</b><span>System Settings → Privacy &amp; Security → Local Network → turn on OfficeLink, then quit and reopen.</span></div><button class="primary-btn small" data-nw="mac">Open Settings</button></div>`
+        : ''
+    }
+    ${
+      st.waiting
+        ? `<div class="nw-card warn">${CLOCK}<div class="nw-text"><b>${st.waiting} message${st.waiting === 1 ? '' : 's'} waiting</b><span>They go out automatically as soon as the other computer answers.</span></div><button class="primary-btn small" data-nw="retry">Retry now</button></div>`
+        : ''
+    }`
+  );
+}
+
+function showNetwork() {
+  const { el, close } = openModal(
+    `<div class="modal-head"><h3>Connection &amp; people</h3><button class="icon-btn" data-close>${ICON.x}</button></div>
+    <div class="modal-body">
+      <div id="nw-status"></div>
+      <h4 class="nw-title">People on this network</h4>
+      <div id="nw-list" class="nw-list"></div>
+      <p class="muted small-print">If someone shows an error: “No answer” usually means a firewall on their PC or that it is asleep. “Not running” means OfficeLink is closed there. Both computers must be on the same office Wi-Fi/LAN.</p>
+    </div>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="nw-find"></button>
+      <button class="ghost-btn" id="nw-add">${ICON.plus}<span>Add by IP</span></button>
+      <span class="grow"></span>
+      <button class="primary-btn" data-close>Done</button>
+    </div>`,
+    { wide: true }
+  );
+  renderNetworkList();
+  paintFindUsersBtn();
+  $('#nw-find', el).addEventListener('click', findUsers);
+  $('#nw-add', el).addEventListener('click', () => {
+    close();
+    showAddPeer();
+  });
+  el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-nw]');
+    if (!b) return;
+    const peerId = b.closest('[data-peer]')?.dataset.peer;
+    const act = b.dataset.nw;
+    if (act === 'copy') {
+      await api.copyText(netAddrs(S.state).map((a) => `${a.ip}:${S.state.port}`).join('\n'));
+      toast('Address copied — a colleague can use it with “Add by IP”', 'success');
+    }
+    if (act === 'mac') api.openMacPrivacy();
+    if (act === 'retry') retryWaiting();
+    if (act === 'test') {
+      b.disabled = true;
+      b.textContent = 'Testing…';
+      await testConnection(peerId);
+      b.disabled = false;
+      b.textContent = 'Test';
+    }
+    if (act === 'chat') {
+      close();
+      openConv(dmId(me().id, peerId));
+    }
+  });
+}
+
+async function retryWaiting() {
+  const before = S.state.waiting || 0;
+  toast('Retrying…');
+  try {
+    const res = await call('retryPending');
+    const now = res?.waiting || 0;
+    if (!now) toast('All messages delivered', 'success');
+    else if (now < before) toast(`Delivered some. ${now} still waiting.`, 'success');
+    else toast('Still cannot reach them. Use “Test connection” to see why.', 'error');
+  } catch {
+    // toast already shown
+  }
 }
 
 function mentionQuery() {
@@ -1381,12 +1650,8 @@ function messageFromEvent(e) {
 
 function wireUi() {
   document.body.classList.toggle('mac', api.platform === 'darwin');
-  $('#new-group-btn').innerHTML = ICON.groupAdd;
+  $('#new-btn').innerHTML = ICON.compose;
   $('#settings-btn').innerHTML = ICON.settings;
-  $('#help-btn').innerHTML = ICON.help;
-  $('#copy-addr-btn').innerHTML = ICON.copyAddr;
-  $('#add-peer-btn').innerHTML = `${ICON.plus}<span>Add by IP</span>`;
-  paintFindUsersBtn();
   $('#attach-btn').innerHTML = ICON.clip;
   $('#emoji-btn').innerHTML = ICON.smile;
   $('#send-btn').innerHTML = ICON.send;
@@ -1395,7 +1660,8 @@ function wireUi() {
 
   $('#me-btn').addEventListener('click', (e) => showStatusMenu(e.currentTarget));
   $('#settings-btn').addEventListener('click', showSettings);
-  $('#help-btn').addEventListener('click', showHelp);
+  $('#new-btn').addEventListener('click', (e) => showNewMenu(e.currentTarget));
+  $('#net-btn').addEventListener('click', showNetwork);
   $('#update-banner').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-up]');
     if (!b) return;
@@ -1403,40 +1669,42 @@ function wireUi() {
     if (b.dataset.up === 'cancel') await api.update('cancel');
     if (b.dataset.up === 'check') await api.update('check');
   });
-  $('#copy-addr-btn').addEventListener('click', async () => {
-    const st = S.state;
-    if (!st?.addresses?.length) return;
-    const lines = netAddrs(st).map((a) => `${a.ip}:${st.port}`).join('\n');
-    await api.copyText(lines);
-    toast(netAddrs(st).length > 1 ? 'Wi-Fi and LAN addresses copied' : 'Address copied — send it to a colleague to Add by IP', 'success');
+  $('#alert-banner').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-alert]');
+    if (!b) return;
+    if (b.dataset.alert === 'mac') api.openMacPrivacy();
+    if (b.dataset.alert === 'retry') retryWaiting();
+    if (b.dataset.alert === 'test' && S.active.startsWith('dm:')) testConnection(peerOfDm(S.active));
   });
-  $('#add-peer-btn').addEventListener('click', showAddPeer);
-  $('#find-users-btn').addEventListener('click', findUsers);
-  $('#new-group-btn').addEventListener('click', () => showGroupModal(null));
   $('#side-filter').addEventListener('input', (e) => {
     S.filter = e.target.value;
     renderSidebar();
   });
+  $('#side-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-tab]');
+    if (!b) return;
+    S.tab = b.dataset.tab;
+    renderSidebar();
+  });
   $('#conv-list').addEventListener('click', (e) => {
+    const action = e.target.closest('[data-list]');
+    if (action?.dataset.list === 'read-all') return call('markAllRead');
+    if (action?.dataset.list === 'network') return showNetwork();
     const item = e.target.closest('[data-conv]');
     if (item) openConv(item.dataset.conv);
-    if (e.target.closest('#mac-privacy-btn')) api.openMacPrivacy();
   });
   $('#conv-list').addEventListener('contextmenu', (e) => {
     const item = e.target.closest('[data-conv]');
     if (!item) return;
     e.preventDefault();
-    showConvMenu(item, item.dataset.conv);
+    showChatMenu(item, item.dataset.conv);
   });
 
   $('#chat-head').addEventListener('click', (e) => {
     const b = e.target.closest('[data-head]');
     if (!b) return;
     if (b.dataset.head === 'search') ($('#search-panel').hidden ? openSearch() : closeSearch());
-    if (b.dataset.head === 'group') showGroupModal(S.active);
-    if (b.dataset.head === 'peer-info') showPeerInfo(peerOfDm(S.active));
-    if (b.dataset.head === 'pin') call('togglePin', S.active);
-    if (b.dataset.head === 'mute') call('toggleMute', S.active);
+    if (b.dataset.head === 'more') showChatMenu(b, S.active);
   });
   $('#search-input').addEventListener('input', runSearch);
   $('#search-input').addEventListener('keydown', (e) => e.key === 'Escape' && closeSearch());
@@ -1661,14 +1929,24 @@ function wireEvents() {
         prev.me.color !== state.me.color ||
         state.peers.some((p) => {
           const old = prev.peers.find((o) => o.id === p.id);
-          return old && (old.name !== p.name || old.color !== p.color || old.online !== p.online);
+          return old && (old.name !== p.name || old.color !== p.color);
         }));
+    const waitingChanged = prev && prev.waiting !== state.waiting;
     S.state = state;
     applyTheme();
     renderSidebar();
     renderHeader();
+    renderNetworkList();
     if (namesChanged) renderMessages('keep');
+    else if (waitingChanged) refreshWaiting();
     if (firstGroupDrop) openConv('general');
+  });
+
+  api.on('cleared', ({ convId }) => {
+    if (convId !== S.active) return;
+    S.messages = [];
+    S.hasMore = false;
+    renderMessages('bottom');
   });
 
   api.on('messages', ({ convId, messages, isNew }) => {
@@ -1731,6 +2009,15 @@ function wireEvents() {
   api.on('update', renderUpdate);
 }
 
+/** Queue state lives in the main process; refetch so clocks turn into ticks. */
+async function refreshWaiting() {
+  const convId = S.active;
+  const res = await api.call('getMessages', convId, {});
+  if (S.active !== convId || S.hasMore) return;
+  S.messages = res.messages;
+  renderMessages('keep');
+}
+
 function refreshTyping(convId) {
   renderSidebar();
   if (convId === S.active) {
@@ -1781,7 +2068,8 @@ async function init() {
   renderSidebar();
   await openConv('general');
   if (!S.state.onboarded) showOnboarding();
-  setInterval(() => S.state && renderSidebar(), 4000);
+  // Keeps "last seen 5 min ago" labels fresh; everything else is event driven.
+  setInterval(() => S.state && renderSidebar(), 30000);
 }
 
 init();

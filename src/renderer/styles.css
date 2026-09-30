@@ -314,10 +314,6 @@ body.mac .titlebar-space {
   padding-top: 8px;
 }
 
-.side-foot #copy-addr-btn {
-  margin-left: auto;
-}
-
 .side-search {
   padding: 4px 12px 8px;
 }
@@ -336,42 +332,6 @@ body.mac .titlebar-space {
 .search-panel input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
-.find-users-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin: 0 12px 10px;
-  width: calc(100% - 24px);
-  padding: 9px 12px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  background: var(--accent);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.find-users-btn svg {
-  width: 16px;
-  height: 16px;
-}
-
-.find-users-btn:hover {
-  filter: brightness(1.08);
-}
-
-.find-users-btn:disabled,
-.find-users-btn.busy {
-  opacity: 0.72;
-  cursor: default;
-  filter: none;
-}
-
-.find-users-btn.busy svg {
-  animation: spin 0.9s linear infinite;
 }
 
 @keyframes spin {
@@ -515,35 +475,6 @@ body.mac .titlebar-space {
   50% {
     opacity: 0.35;
   }
-}
-
-.side-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
-}
-
-.side-foot #add-peer-btn {
-  flex: 1;
-  justify-content: center;
-}
-
-.net-status {
-  flex-basis: 100%;
-  padding: 0 2px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  color: var(--text-2);
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: var(--mono);
 }
 
 .net-dot {
@@ -1431,17 +1362,6 @@ mark {
   height: 38px;
 }
 
-.compose-hint {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--text-3);
-  text-align: center;
-}
-
-.compose-hint code {
-  font-size: 10.5px;
-}
-
 .drop-overlay {
   position: absolute;
   inset: 0;
@@ -1938,4 +1858,283 @@ mark {
 
 ::-webkit-scrollbar-thumb:hover {
   background-color: rgba(127, 127, 160, 0.5);
+}
+
+/* ------------------------------------------------------ simplified sidebar */
+
+.side-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 8px;
+}
+
+.side-tabs button {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.side-tabs button:hover {
+  background: var(--side-hover);
+  color: var(--text);
+}
+
+.side-tabs button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.list-action {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-align: left;
+}
+
+.list-action:hover {
+  background: var(--side-hover);
+}
+
+.empty-list {
+  padding: 18px 10px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.conv-flag.warn,
+.head-flag {
+  color: var(--amber);
+}
+
+.head-flag {
+  display: inline-flex;
+  margin-left: 6px;
+  color: var(--text-3);
+  vertical-align: -1px;
+}
+
+.head-flag svg {
+  width: 13px;
+  height: 13px;
+}
+
+.net-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.net-btn:hover {
+  background: var(--side-hover);
+  color: var(--text);
+}
+
+.net-btn svg {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  transform: rotate(-90deg);
+  flex-shrink: 0;
+}
+
+.net-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.net-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.net-dot.ok {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+}
+
+.net-dot.warn {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
+
+.net-dot.bad {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+}
+
+/* ------------------------------------------------------------ alert banner */
+
+.alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  background: rgba(245, 158, 11, 0.12);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.35);
+  flex-shrink: 0;
+}
+
+.alert-banner.danger {
+  background: rgba(239, 68, 68, 0.1);
+  border-bottom-color: rgba(239, 68, 68, 0.35);
+}
+
+.alert-banner > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--amber);
+}
+
+.alert-banner.danger > svg {
+  color: var(--red);
+}
+
+.alert-banner button {
+  flex-shrink: 0;
+}
+
+.primary-btn.small,
+.ghost-btn.small {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+.ticks.waiting {
+  color: inherit;
+  opacity: 0.85;
+}
+
+.menu-item.danger,
+.menu-item.danger svg {
+  color: var(--red);
+}
+
+/* -------------------------------------------------- connection & people */
+
+.nw-title {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.nw-card,
+.nw-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.nw-card {
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.nw-card > svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.nw-card.bad {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.nw-card.bad > svg {
+  color: var(--red);
+}
+
+.nw-card.warn {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.nw-card.warn > svg {
+  color: var(--amber);
+}
+
+.nw-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.nw-row:hover {
+  background: var(--side-hover);
+}
+
+.nw-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.nw-text span {
+  font-size: 12px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.nw-text span.ok {
+  color: var(--green);
+}
+
+.nw-text span.err {
+  color: var(--red);
+}
+
+.nw-text code {
+  font-size: 11.5px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+  flex-shrink: 0;
+}
+
+.chip.warn {
+  color: var(--amber);
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.small-print {
+  margin-top: 14px;
+  font-size: 12px;
+  line-height: 1.5;
 }

@@ -95,12 +95,24 @@ function hostsOnInterface({ address, netmask }) {
   return out;
 }
 
+let addrCache = null;
+let addrCacheAt = 0;
+
 /**
  * Wi-Fi and Ethernet (LAN) addresses on this computer.
  * Virtual adapters (VPN, Hyper-V, Docker, VMware) are skipped so mixed
  * Wi-Fi + cable offices still find each other on the router LAN.
+ * Cached for two seconds: this is called for every request and beacon.
  */
 function localAddresses() {
+  const now = Date.now();
+  if (addrCache && now - addrCacheAt < 2000) return addrCache.map((e) => ({ ...e }));
+  addrCache = readLocalAddresses();
+  addrCacheAt = now;
+  return addrCache.map((e) => ({ ...e }));
+}
+
+function readLocalAddresses() {
   const physical = [];
   const fallback = [];
   let interfaces = {};

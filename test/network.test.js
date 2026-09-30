@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { ChatEngine, dmId, safeFileName, compareVersions } = require('../src/main/engine');
+const { ChatEngine, dmId, safeFileName, compareVersions, describeNetError } = require('../src/main/engine');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'officelink-test-'));
 const waitFor = async (fn, label, timeout = 15000) => {
@@ -214,6 +214,28 @@ async function sha256(file) {
   await waitFor(() => bob.findMessage(dm, pulled.id), 'queued message delivered by pull');
   console.log('✓ name changes and pull-delivery stay in sync');
 
+  // Mac → Windows bug: the saved address is dead (Wi-Fi slept / DHCP moved it),
+  // UDP presence says "offline", but the colleague's other address works.
+  // Pull is disabled on bob's side so only alice's push can deliver.
+  const aliceOnBob = bob.peersFile.data[alice.me.id];
+  const aliceAddr = { ip: aliceOnBob.ip, ips: aliceOnBob.ips };
+  Object.assign(aliceOnBob, { ip: '', ips: [] });
+  Object.assign(bobPeer, { ip: '127.0.0.9', ips: ['127.0.0.9', '127.0.0.1'] });
+  alice.seen.delete(bob.me.id);
+  const pushed = alice.sendText(dm, 'push-with-stale-ip');
+  const shown = alice.getMessages(dm).messages.find((m) => m.id === pushed.id);
+  assert.strictEqual(shown.waiting, 1, 'queued message is shown as waiting');
+  await waitFor(() => bob.findMessage(dm, pushed.id), 'push delivered via second address', 20000);
+  assert.notStrictEqual(bobPeer.ip, '127.0.0.9', 'a working address becomes preferred');
+  await waitFor(() => !alice.getMessages(dm).messages.find((m) => m.id === pushed.id).waiting, 'waiting flag clears');
+  Object.assign(aliceOnBob, aliceAddr);
+  const probe = await alice.testPeer(bob.me.id);
+  assert.ok(probe.ok, 'connection test succeeds');
+  assert.ok(probe.results.some((r) => r.ok && r.ip === '127.0.0.1'));
+  assert.strictEqual(describeNetError({ code: 'ECONNREFUSED' }), 'Computer is on, but OfficeLink is not running there');
+  assert.match(describeNetError(new Error('Request timed out')), /firewall/);
+  console.log('✓ queued messages reach a colleague through any of their addresses');
+
   const codeA = path.join(tmp, 'code-a');
   const codeB = path.join(tmp, 'code-b');
   for (const [root, label] of [
@@ -254,6 +276,11 @@ async function sha256(file) {
   // History persisted across restart
   assert(bob2.findMessage(dm, reply.id), 'history survives restart');
   console.log('✓ chat history persists across restarts');
+
+  bob2.clearConversation(dm);
+  assert.strictEqual(bob2.getMessages(dm).messages.length, 0);
+  assert.ok(alice.findMessage(dm, reply.id), 'clearing is local to one computer');
+  console.log('✓ clear chat removes history on this computer only');
 
   // Workspace isolation
   bob2.updateSettings({ workspace: 'finance' });

@@ -21,6 +21,28 @@ const CHUNK = 1024 * 1024;
 const COLORS = ['#6366f1', '#0ea5e9', '#14b8a6', '#22c55e', '#eab308', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#64748b'];
 const THUMB_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.tif', '.tiff', '.pdf', '.mp4', '.mov', '.m4v']);
 
+const OFFLINE_RETRY_MS = 15000;
+const OFFLINE_SYNC_MS = 20000;
+
+// A fresh TCP connection per request. Node's default keep-alive agent reused
+// sockets that had silently died (Wi-Fi sleep, DHCP change), so sends hung
+// until they timed out and messages stayed queued.
+const lanAgent = new http.Agent({ keepAlive: false, maxSockets: 32 });
+
+/** Turns a socket/HTTP error into something a person can act on. */
+function describeNetError(err) {
+  const code = err?.code || '';
+  if (err?.status === 403) return 'Uses a different workspace name';
+  if (err?.status) return `Their app answered with an error (${err.status})`;
+  if (code === 'ECONNREFUSED') return 'Computer is on, but OfficeLink is not running there';
+  if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') return 'No route to that computer (different network, or blocked)';
+  if (code === 'EHOSTDOWN') return 'That computer is off or asleep';
+  if (code === 'ECONNRESET' || code === 'EPIPE') return 'Connection dropped';
+  if (code === 'EADDRNOTAVAIL') return 'This computer changed networks';
+  if (/timed out/i.test(err?.message || '') || code === 'ETIMEDOUT') return 'No answer (firewall on their computer, or it is asleep)';
+  return err?.message || 'Could not connect';
+}
+
 const uid = () => crypto.randomUUID();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -165,6 +187,13 @@ class ChatEngine extends EventEmitter {
     this.lastCollected = new Map();
     this.notedJoins = new Set();
     this.helloBusy = new Set();
+    this.reach = new Map();
+    this.lastFlushTry = new Map();
+    this.lastSyncTry = new Map();
+    this.pendingIndex = null;
+    this.lastScanAt = 0;
+    this.macBlockedAt = 0;
+    this._feed = null;
     this.bonjour = null;
     this.startedAt = Date.now();
     this.syncing = false;
@@ -286,11 +315,11 @@ class ChatEngine extends EventEmitter {
         this.bonjour.on('error', (err) => this.emit('log', `Bonjour: ${err.message}`));
         this.bonjour.start();
       }
-      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 800));
+      // A full subnet scan is ~500+ connection attempts. It used to run every
+      // 12 s on Macs, which kept the app and the Wi-Fi busy all the time.
       this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 1500));
-      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 4000));
-      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 8000));
-      this.timers.push(setInterval(() => this.probeLan().catch(() => {}), process.platform === 'darwin' ? 12000 : 60000));
+      this.timers.push(setTimeout(() => this.probeLan().catch(() => {}), 10000));
+      this.timers.push(setInterval(() => this.maybeProbeLan(), 30000));
     }
 
     this.timers.push(setInterval(() => this.presenceTick(), this.presenceInterval));
@@ -345,7 +374,7 @@ class ChatEngine extends EventEmitter {
   // ----------------------------------------------------------------- presence
 
   publicProfile() {
-    const pack = this._codePack || { sha: '', mtime: 0 };
+    const pack = this._codePack || this.codePack();
     return {
       app: APP_TAG,
       v: PROTOCOL_VERSION,
@@ -480,11 +509,14 @@ class ChatEngine extends EventEmitter {
     if (online !== this.lastOnline) {
       this.lastOnline = online;
       this.emitState();
-    } else if (process.platform === 'darwin') {
-      this.emitState();
     }
+    // Retry queued messages even when UDP presence hasn't marked the peer
+    // online: beacons are often dropped between Macs and Windows PCs while
+    // plain HTTP works fine.
+    const now = Date.now();
     for (const id of Object.keys(this.outboxFile.data)) {
-      if (this.isOnline(id)) this.flushOutbox(id);
+      const wait = this.isOnline(id) ? 0 : OFFLINE_RETRY_MS;
+      if (now - (this.lastFlushTry.get(id) || 0) >= wait) this.flushOutbox(id);
     }
     if (this.discovery) {
       for (const p of Object.values(this.peersFile.data)) {
@@ -508,8 +540,23 @@ class ChatEngine extends EventEmitter {
     }
     this.syncing = true;
     this.syncPromise = (async () => {
-      const peers = Object.values(this.peersFile.data).filter((p) => (p.ws || '') === this.workspace && p.ip && p.port);
-      await Promise.all(peers.map((p) => this.syncWithPeer(p).catch(() => {})));
+      const now = Date.now();
+      const peers = Object.values(this.peersFile.data).filter((p) => {
+        if ((p.ws || '') !== this.workspace || !p.ip || !p.port) return false;
+        // Offline colleagues are polled less often so dead addresses don't
+        // hold every round up for the full timeout.
+        if (!force && !this.isOnline(p.id) && now - (this.lastSyncTry.get(p.id) || 0) < OFFLINE_SYNC_MS) return false;
+        this.lastSyncTry.set(p.id, now);
+        return true;
+      });
+      await Promise.all(
+        peers.map((p) =>
+          this.syncWithPeer(p).then(
+            () => this.noteReach(p.id, null),
+            (err) => this.noteReach(p.id, err)
+          )
+        )
+      );
     })();
     try {
       await this.syncPromise;
@@ -548,6 +595,7 @@ class ChatEngine extends EventEmitter {
     if (!res) throw lastErr || new Error('Peer unreachable');
     if (acks.length) this.pendingAcks.delete(p.id);
     if (res.profile) this.touchPeer(res.profile, usedIp, { manual: !!p.manual });
+    if (res.profile?.id === p.id && this.outboxFile.data[p.id]?.length) this.flushOutbox(p.id);
     this.ingestGossip(res.peers, usedIp);
     const events = Array.isArray(res.events) ? res.events : [];
     const got = [];
@@ -588,6 +636,8 @@ class ChatEngine extends EventEmitter {
   removePeer(peerId) {
     delete this.peersFile.data[peerId];
     delete this.outboxFile.data[peerId];
+    this.pendingIndex = null;
+    this.reach.delete(peerId);
     this.seen.delete(peerId);
     this.notedJoins.delete(peerId);
     this.peersFile.save();
@@ -683,10 +733,11 @@ class ChatEngine extends EventEmitter {
     const targets = this.lanNeighborIps();
     if (!targets.length) return { scanned: 0, found: 0 };
     this.scanning = true;
+    this.lastScanAt = Date.now();
     this.emit('log', `Scanning Wi-Fi and LAN for OfficeLink (${targets.length} addresses)`);
     const before = this.peerList().length;
-    const ports = [...new Set([this.port, this.preferredPort, 45321, 45322, 45323])].filter(Boolean);
-    const concurrency = process.platform === 'darwin' ? 32 : 48;
+    const ports = [...new Set([this.port, this.preferredPort, 45321, 45322])].filter(Boolean);
+    const concurrency = 24;
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
@@ -711,6 +762,15 @@ class ChatEngine extends EventEmitter {
       this.scanning = false;
     }
     return { scanned: targets.length, found: Math.max(0, this.peerList().length - before) };
+  }
+
+  /** Background scan: often while someone is missing, rarely once everyone is connected. */
+  maybeProbeLan() {
+    const peers = this.peerList();
+    const dayAgo = Date.now() - 24 * 3600 * 1000;
+    const missing = !peers.some((p) => p.online) || peers.some((p) => !p.online && (p.lastSeen || 0) > dayAgo);
+    const every = missing ? 2 * 60 * 1000 : 10 * 60 * 1000;
+    if (Date.now() - this.lastScanAt >= every) this.probeLan().catch(() => {});
   }
 
   async findUsers() {
@@ -756,9 +816,14 @@ class ChatEngine extends EventEmitter {
   // --------------------------------------------------------------- transport
 
   request(host, port, method, pathName, body, timeout = 8000) {
+    const started = Date.now();
     return new Promise((resolve, reject) => {
       const payload = body ? Buffer.from(JSON.stringify(body)) : null;
       const from = localAddressFor(host);
+      const fail = (err) => {
+        err.elapsed = Date.now() - started;
+        reject(err);
+      };
       const req = http.request(
         {
           hostname: host,
@@ -766,6 +831,7 @@ class ChatEngine extends EventEmitter {
           method,
           path: pathName,
           family: 4,
+          agent: lanAgent,
           ...(from ? { localAddress: from } : {}),
           headers: {
             ...this.headers(),
@@ -785,16 +851,75 @@ class ChatEngine extends EventEmitter {
             if (res.statusCode >= 400) {
               const err = new Error(data.error || `HTTP ${res.statusCode}`);
               err.status = res.statusCode;
-              reject(err);
+              fail(err);
             } else resolve(data);
           });
+          res.on('error', fail);
         }
       );
-      req.setTimeout(timeout, () => req.destroy(new Error('Request timed out')));
-      req.on('error', reject);
+      // req.setTimeout() only starts once the socket has connected. Without an
+      // overall deadline a connect to a sleeping PC or a stale address hangs
+      // for the OS default (~75 s on macOS, ~21 s on Windows), blocking that
+      // colleague's queue and every sync round meanwhile.
+      const deadline = setTimeout(() => req.destroy(new Error('Request timed out')), timeout);
+      req.on('close', () => clearTimeout(deadline));
+      req.on('error', fail);
       if (payload) req.write(payload);
       req.end();
     });
+  }
+
+  /**
+   * Sends to a colleague trying every address they advertised (Wi-Fi, LAN).
+   * The address that answers becomes their preferred one.
+   */
+  async requestPeer(peer, method, pathName, body, timeout = 6000) {
+    const ips = this.orderIps([peer.ip, ...(peer.ips || [])]);
+    if (!ips.length || !peer.port) throw new Error('No address known for this colleague');
+    let lastErr;
+    for (const ip of ips) {
+      try {
+        const res = await this.request(ip, peer.port, method, pathName, body, timeout);
+        if (peer.ip !== ip && this.peersFile.data[peer.id] === peer) {
+          peer.ip = ip;
+          this.peersFile.save();
+        }
+        if (this.macBlockedAt) {
+          this.macBlockedAt = 0;
+          this.emitState();
+        }
+        return res;
+      } catch (err) {
+        lastErr = err;
+        if (err.status === 403) break;
+        this.checkMacBlocked(peer, err);
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * macOS silently denies LAN connections when OfficeLink lacks the Local
+   * Network permission: connect() fails instantly with "No route to host"
+   * even though that colleague just reached us.
+   */
+  checkMacBlocked(peer, err) {
+    if (process.platform !== 'darwin') return;
+    if (err.code !== 'EHOSTUNREACH' && err.code !== 'ENETUNREACH') return;
+    if ((err.elapsed ?? 1e9) > 200 || !this.isOnline(peer.id)) return;
+    if (!this.macBlockedAt) {
+      this.macBlockedAt = Date.now();
+      this.emit('log', 'macOS appears to be blocking local network connections');
+      this.emitState();
+    }
+  }
+
+  noteReach(pid, err) {
+    if (!this.peersFile.data[pid]) return;
+    const prev = this.reach.get(pid);
+    const next = err ? { ok: false, error: describeNetError(err), at: Date.now() } : { ok: true, at: Date.now() };
+    this.reach.set(pid, next);
+    if (!prev || prev.ok !== next.ok || prev.error !== next.error) this.emitState();
   }
 
   recipientsOf(convId) {
@@ -822,40 +947,110 @@ class ChatEngine extends EventEmitter {
       if (box.length > OUTBOX_LIMIT) box.splice(0, box.length - OUTBOX_LIMIT);
     }
     this.outboxFile.save();
-    for (const pid of recipients) {
-      const peer = this.peersFile.data[pid];
-      if (peer?.ip) this.flushOutbox(pid);
-    }
+    this.pendingIndex = null;
+    for (const pid of recipients) this.flushOutbox(pid);
   }
 
   async flushOutbox(pid) {
     if (this.flushing.has(pid)) return;
     const peer = this.peersFile.data[pid];
-    if (!peer || !peer.ip) return;
+    if (!peer || !this.outboxFile.data[pid]) return;
     this.flushing.add(pid);
+    this.lastFlushTry.set(pid, Date.now());
     try {
       for (;;) {
         const box = this.outboxFile.data[pid];
         if (!box || !box.length) {
           delete this.outboxFile.data[pid];
+          this.outboxFile.save();
           break;
         }
         const batch = box.slice(0, BATCH_SIZE);
-        const res = await this.request(peer.ip, peer.port, 'POST', '/api/events', {
+        const res = await this.requestPeer(peer, 'POST', '/api/events', {
           from: this.publicProfile(),
           events: batch,
         });
         const acked = new Set(Array.isArray(res.acks) ? res.acks : batch.map((e) => e.eid));
         this.outboxFile.data[pid] = (this.outboxFile.data[pid] || []).filter((e) => !acked.has(e.eid));
         this.outboxFile.save();
+        this.pendingIndex = null;
         for (const e of batch) if (acked.has(e.eid)) this.onDelivered(pid, e);
         if (!acked.size) break;
       }
-    } catch {
-      // Peer not reachable right now; the presence loop retries.
+      this.noteReach(pid, null);
+    } catch (err) {
+      // Not reachable right now; presenceTick retries, and the colleague
+      // also pulls queued messages from us via /api/collect.
+      this.noteReach(pid, err);
     } finally {
       this.flushing.delete(pid);
     }
+  }
+
+  /** Message ids that still wait in some colleague's queue → number of colleagues. */
+  pendingCounts() {
+    if (this.pendingIndex) return this.pendingIndex;
+    const index = new Map();
+    for (const box of Object.values(this.outboxFile.data)) {
+      for (const e of box || []) {
+        if (e.type === 'msg' && e.message?.id) index.set(e.message.id, (index.get(e.message.id) || 0) + 1);
+      }
+    }
+    this.pendingIndex = index;
+    return index;
+  }
+
+  /**
+   * Chat messages (not receipts/typing) still queued for someone. Colleagues
+   * not seen for days are left out: #general queues for everyone ever seen,
+   * and a PC that left the office shouldn't keep a warning up forever.
+   */
+  waitingCount() {
+    const since = Date.now() - 3 * 24 * 3600 * 1000;
+    let n = 0;
+    for (const [pid, box] of Object.entries(this.outboxFile.data)) {
+      if ((this.peersFile.data[pid]?.lastSeen || 0) < since) continue;
+      n += (box || []).filter((e) => e.type === 'msg').length;
+    }
+    return n;
+  }
+
+  /** "Retry now" for everything still queued. */
+  async retryPending() {
+    const ids = Object.keys(this.outboxFile.data);
+    await Promise.all(ids.map((id) => this.flushOutbox(id)));
+    this.emitState();
+    return { waiting: this.waitingCount() };
+  }
+
+  /** Tries every address of one colleague and reports what happened. */
+  async testPeer(peerId) {
+    const p = this.peersFile.data[peerId];
+    if (!p) throw new Error('Unknown colleague');
+    const ips = this.orderIps([p.ip, ...(p.ips || [])]);
+    const results = [];
+    for (const ip of ips) {
+      const started = Date.now();
+      try {
+        const res = await this.request(ip, p.port, 'POST', '/api/hello', { profile: this.publicProfile(), peers: this.gossipPeers(p.id) }, 5000);
+        if (res.profile?.id === p.id) this.touchPeer(res.profile, ip, { manual: !!p.manual });
+        const same = res.profile?.id === p.id;
+        results.push({ ip, port: p.port, ok: same, ms: Date.now() - started, error: same ? '' : 'A different computer answers at this address' });
+      } catch (err) {
+        this.checkMacBlocked(p, err);
+        results.push({ ip, port: p.port, ok: false, ms: Date.now() - started, error: describeNetError(err) });
+      }
+    }
+    const ok = results.some((r) => r.ok);
+    if (ok) await this.flushOutbox(peerId);
+    else if (results.length) this.noteReach(peerId, { message: results[results.length - 1].error });
+    return {
+      name: p.name,
+      ok,
+      results,
+      waiting: (this.outboxFile.data[peerId] || []).filter((e) => e.type === 'msg').length,
+      localNetworkBlocked: !!this.macBlockedAt,
+    };
   }
 
   onDelivered(pid, e) {
@@ -911,6 +1106,7 @@ class ChatEngine extends EventEmitter {
         if (kept.length) this.outboxFile.data[from.id] = kept;
         else delete this.outboxFile.data[from.id];
         this.outboxFile.save();
+        this.pendingIndex = null;
         for (const eid of acked) {
           const orig = this.lastCollected.get(`${from.id}:${eid}`);
           if (orig) {
@@ -1004,6 +1200,13 @@ class ChatEngine extends EventEmitter {
   }
 
   feedVersion() {
+    const now = Date.now();
+    if (this._feed && now - this._feed.at < 30000) return this._feed.value;
+    this._feed = { at: now, value: this.readFeedVersion() };
+    return this._feed.value;
+  }
+
+  readFeedVersion() {
     try {
       const raw = fs.readFileSync(path.join(this.resolvedFeedDir(), 'latest.json'), 'utf8');
       const ver = JSON.parse(raw).version;
@@ -1015,7 +1218,8 @@ class ChatEngine extends EventEmitter {
 
   codePack() {
     const now = Date.now();
-    if (this._codePack && now - (this._codePackAt || 0) < 30000) return this._codePack;
+    // Reads and hashes every source file synchronously, so keep it for a while.
+    if (this._codePack && now - (this._codePackAt || 0) < 5 * 60 * 1000) return this._codePack;
     try {
       this._codePack = collectSource(this.codeRoot);
     } catch (err) {
@@ -1294,8 +1498,8 @@ class ChatEngine extends EventEmitter {
       forwarded: extra.forwarded || null,
     };
     this.insertMessage(msg);
-    this.emitMessages(convId, [msg], true);
     this.dispatch(convId, { type: 'msg', message: this.wire(msg) });
+    this.emitMessages(convId, [msg], true);
     this.emitState();
     return msg;
   }
@@ -1336,8 +1540,8 @@ class ChatEngine extends EventEmitter {
         readBy: [],
       };
       this.insertMessage(msg);
-      this.emitMessages(convId, [msg], true);
       this.dispatch(convId, { type: 'msg', message: this.wire(msg) });
+      this.emitMessages(convId, [msg], true);
       sent.push(msg);
     }
     this.emitState();
@@ -1418,6 +1622,24 @@ class ChatEngine extends EventEmitter {
       this.metaFile.save();
       this.dispatch(convId, { type: 'read', upTo: latest });
     }
+  }
+
+  markAllRead() {
+    for (const [convId, n] of Object.entries(this.metaFile.data.unread)) if (n) this.markRead(convId);
+    this.emitState();
+  }
+
+  /** Removes a chat's history from this computer only. */
+  clearConversation(convId) {
+    this.checkConv(convId);
+    const list = this.getConv(convId);
+    for (const m of list) if (m.file && this.downloads.has(m.file.id)) this.cancelDownload(m.file.id);
+    list.length = 0;
+    this.metaFile.data.unread[convId] = 0;
+    this.saveConv(convId);
+    this.metaFile.save();
+    this.emit('cleared', { convId });
+    this.emitState();
   }
 
   setActive(convId, focused) {
@@ -1552,13 +1774,6 @@ class ChatEngine extends EventEmitter {
     if (!msg || !msg.file || msg.from === this.me.id) return;
     const f = msg.file;
     if (this.downloads.has(f.id)) return;
-    if (!this.isOnline(msg.from)) {
-      f.state = 'failed';
-      f.error = 'The sender is offline. Try again when they are online.';
-      this.saveConv(convId);
-      this.emitMessages(convId, [msg]);
-      return;
-    }
     const job = { convId, msgId, fileId: f.id, cancelled: false, req: null };
     this.downloads.set(f.id, job);
     f.state = 'downloading';
@@ -1577,7 +1792,7 @@ class ChatEngine extends EventEmitter {
       await fsp.mkdir(tmpDir, { recursive: true });
       for (let attempt = 0; attempt < 5 && !job.cancelled; attempt++) {
         try {
-          await this.fetchToFile(job, msg, partPath);
+          await this.fetchToFile(job, msg, partPath, attempt);
           lastErr = null;
           break;
         } catch (err) {
@@ -1605,16 +1820,19 @@ class ChatEngine extends EventEmitter {
       fsp.rm(partPath, { force: true }).catch(() => {});
     } else if (lastErr) {
       f.state = 'failed';
-      f.error = lastErr.message;
+      f.error = lastErr.fatal ? lastErr.message : `Download failed: ${describeNetError(lastErr)}`;
     }
     this.saveConv(job.convId);
     this.emitMessages(job.convId, [msg]);
   }
 
-  async fetchToFile(job, msg, partPath) {
+  async fetchToFile(job, msg, partPath, attempt = 0) {
     const f = msg.file;
     const peer = this.peersFile.data[msg.from];
-    if (!peer || !peer.ip) throw Object.assign(new Error('The sender is offline'), { fatal: true });
+    const ips = peer ? this.orderIps([peer.ip, ...(peer.ips || [])]) : [];
+    if (!ips.length) throw Object.assign(new Error('The sender is not connected'), { fatal: true });
+    const host = ips[attempt % ips.length];
+    const from = localAddressFor(host);
     let offset = 0;
     try {
       offset = (await fsp.stat(partPath)).size;
@@ -1629,12 +1847,18 @@ class ChatEngine extends EventEmitter {
 
     await new Promise((resolve, reject) => {
       const req = http.get({
-        hostname: peer.ip,
+        hostname: host,
         port: peer.port,
+        family: 4,
+        agent: lanAgent,
+        ...(from ? { localAddress: from } : {}),
         path: `/files/${encodeURIComponent(f.id)}`,
         headers: { ...this.headers(), ...(offset > 0 ? { Range: `bytes=${offset}-` } : {}) },
       });
       job.req = req;
+      const connectDeadline = setTimeout(() => req.destroy(new Error('Request timed out')), 8000);
+      req.on('response', () => clearTimeout(connectDeadline));
+      req.on('close', () => clearTimeout(connectDeadline));
       req.setTimeout(30000, () => req.destroy(new Error('The connection stalled')));
       req.on('error', reject);
       req.on('response', (res) => {
@@ -1720,6 +1944,8 @@ class ChatEngine extends EventEmitter {
         codeSha: p.codeSha || '',
         codeTime: p.codeTime || 0,
         sharingUpdates: !!p.sharingUpdates,
+        waiting: (this.outboxFile.data[p.id] || []).filter((e) => e.type === 'msg').length,
+        reach: this.reach.get(p.id) || null,
       }))
       .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
   }
@@ -1758,10 +1984,13 @@ class ChatEngine extends EventEmitter {
       convs,
       platform: process.platform,
       lookingForPeers: process.platform === 'darwin' && !this.peerList().some((p) => p.online),
+      localNetworkBlocked: !!this.macBlockedAt,
+      waiting: this.waitingCount(),
+      scanning: !!this.scanning,
       findingUsers: !!this.finding,
       uptimeMs: Date.now() - this.startedAt,
       appVersion: this.appVersion,
-      codeSha: this.codePack().sha,
+      codeSha: (this._codePack || this.codePack()).sha,
       feedVersion: this.feedVersion(),
       feedDir: this.resolvedFeedDir(),
     };
@@ -1783,8 +2012,13 @@ class ChatEngine extends EventEmitter {
   }
 
   decorate(m) {
-    if (!m.file || !this.downloads.has(m.file.id)) return m;
-    return { ...m, file: { ...m.file, state: 'downloading' } };
+    let out = m;
+    if (m.from === this.me.id && !m.system && !m.deleted) {
+      const waiting = this.pendingCounts().get(m.id) || 0;
+      if (waiting) out = { ...out, waiting };
+    }
+    if (m.file && this.downloads.has(m.file.id)) out = { ...out, file: { ...m.file, state: 'downloading' } };
+    return out;
   }
 
   search(convId, query) {
@@ -1816,4 +2050,4 @@ class ChatEngine extends EventEmitter {
   }
 }
 
-module.exports = { ChatEngine, dmId, safeFileName, compareVersions };
+module.exports = { ChatEngine, dmId, safeFileName, compareVersions, describeNetError };

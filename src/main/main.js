@@ -221,6 +221,10 @@ const ENGINE_METHODS = new Set([
   'togglePin',
   'toggleMute',
   'forwardMessage',
+  'testPeer',
+  'retryPending',
+  'markAllRead',
+  'clearConversation',
 ]);
 
 function registerIpc() {
@@ -317,6 +321,7 @@ function wireEngine() {
   });
   engine.on('messages', (payload) => send('messages', payload));
   engine.on('removed', (payload) => send('removed', payload));
+  engine.on('cleared', (payload) => send('cleared', payload));
   engine.on('typing', (payload) => send('typing', payload));
   engine.on('transfer', (payload) => send('transfer', payload));
   engine.on('log', (line) => console.log('[engine]', line));
@@ -388,7 +393,8 @@ async function boot() {
 
   powerMonitor.on('resume', () => {
     engine.discovery?.announce('hello');
-    engine.syncKnownPeers?.();
+    engine.syncKnownPeers?.({ force: true });
+    engine.retryPending?.().catch(() => {});
     engine.probeLan?.().catch(() => {});
   });
   probeLocalNetwork();
