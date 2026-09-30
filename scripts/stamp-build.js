@@ -22,6 +22,9 @@ if (git('status', '--porcelain', '--', 'src', 'package.json')) {
   console.warn('⚠ You have uncommitted changes in src/. Commit and push them, or every PC will see this build as out of date.');
 }
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-const info = { sha, version: pkg.version, builtAt: Date.now() };
+// --fresh: the first launch after installing clears all previous OfficeLink
+// data on that computer (see freshStartForNewInstall in src/main/main.js).
+const freshData = process.argv.includes('--fresh');
+const info = { sha, version: pkg.version, builtAt: Date.now(), freshData };
 fs.writeFileSync(path.join(root, 'build-info.json'), `${JSON.stringify(info, null, 2)}\n`);
-console.log(`build-info.json: ${sha.slice(0, 7) || 'no git commit'} (v${pkg.version})`);
+console.log(`build-info.json: ${sha.slice(0, 7) || 'no git commit'} (v${pkg.version})${freshData ? ' — FRESH INSTALL: clears old data on first launch' : ''}`);

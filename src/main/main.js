@@ -21,6 +21,41 @@ const profile = (process.env.OFFICELINK_PROFILE || '').replace(/\W/g, '');
 if (profile) app.setPath('userData', `${app.getPath('userData')}-${profile}`);
 
 /**
+ * Installers built with `npm run dist:fresh` start with a clean slate: the
+ * first launch of that build clears chats, contacts, queues, profile and
+ * downloaded updates. Runs once per build (remembered in `fresh-install`), so
+ * restarts and `git push` updates never wipe anything. Files saved to the
+ * Downloads folder are left alone.
+ */
+function freshStartForNewInstall() {
+  let info;
+  try {
+    info = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'build-info.json'), 'utf8'));
+  } catch {
+    return; // Updated code or a dev checkout: never wipe from here.
+  }
+  if (!info.freshData || !info.builtAt) return;
+  const userData = app.getPath('userData');
+  const marker = path.join(userData, 'fresh-install');
+  try {
+    if (fs.readFileSync(marker, 'utf8').trim() === String(info.builtAt)) return;
+  } catch {
+    // first launch of this build
+  }
+  for (const name of ['officelink', 'runtime', 'runtime.staging', 'runtime.bak', 'use-runtime', 'auto-update-tried']) {
+    try {
+      fs.rmSync(path.join(userData, name), { recursive: true, force: true });
+    } catch (err) {
+      console.error('Could not clear', name, err);
+    }
+  }
+  fs.mkdirSync(userData, { recursive: true });
+  fs.writeFileSync(marker, String(info.builtAt));
+}
+
+freshStartForNewInstall();
+
+/**
  * Runs the code fetched by Settings → Update (userData/runtime) instead of the
  * code bundled in the installer. Decided by which file is executing, not by
  * env vars: app.relaunch() hands the old process's environment to the new
