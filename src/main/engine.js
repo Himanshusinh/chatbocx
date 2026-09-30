@@ -10,6 +10,7 @@ const { JsonFile } = require('./store');
 const { Discovery, localAddresses, APP_TAG, sameSubnet, hostsOnInterface, reachableOn, ifaceKind, isIpv4, localAddressFor } = require('./discovery');
 const { BonjourDiscovery } = require('./bonjour');
 const { collectSource } = require('./codepack');
+const sealed = require('./sealed');
 
 const PROTOCOL_VERSION = 1;
 const ONLINE_TIMEOUT = 15000;
@@ -22,6 +23,11 @@ const COLORS = ['#6366f1', '#0ea5e9', '#14b8a6', '#22c55e', '#eab308', '#f97316'
 const THUMB_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.tif', '.tiff', '.pdf', '.mp4', '.mov', '.m4v']);
 
 const OFFLINE_RETRY_MS = 15000;
+// Store-and-forward: colleagues hold sealed copies for someone who is offline.
+const RELAY_COPIES = 3;
+const RELAY_TTL_MS = 14 * 24 * 3600 * 1000;
+const RELAY_MAX_ITEMS = 500;
+const RELAY_MAX_BYTES = 20 * 1024 * 1024;
 const OFFLINE_SYNC_MS = 20000;
 
 // A fresh TCP connection per request. Node's default keep-alive agent reused
@@ -158,12 +164,14 @@ class ChatEngine extends EventEmitter {
       updateBranch: 'main',
       ...this.config.data.settings,
     };
+    if (!this.config.data.keys?.boxPub || !this.config.data.keys?.signPub) this.config.data.keys = sealed.generateKeys();
     this.config.save();
 
     this.peersFile = new JsonFile(path.join(this.dataDir, 'peers.json'), {}, { delay: 3000 });
     this.groupsFile = new JsonFile(path.join(this.dataDir, 'groups.json'), {});
     this.outboxFile = new JsonFile(path.join(this.dataDir, 'outbox.json'), {});
     this.sharedFile = new JsonFile(path.join(this.dataDir, 'shared.json'), {});
+    this.relayFile = new JsonFile(path.join(this.dataDir, 'relay.json'), {});
     this.metaFile = new JsonFile(path.join(this.dataDir, 'meta.json'), () => ({
       unread: {},
       lastActivity: {},
@@ -188,6 +196,9 @@ class ChatEngine extends EventEmitter {
     this.notedJoins = new Set();
     this.helloBusy = new Set();
     this.reach = new Map();
+    this.replicating = new Set();
+    this.relayBusy = new Set();
+    this.relayHello = new Map();
     this.lastFlushTry = new Map();
     this.lastSyncTry = new Map();
     this.pendingIndex = null;
@@ -351,6 +362,9 @@ class ChatEngine extends EventEmitter {
   }
 
   async stop() {
+    // The usual case for "they never got it": the sender closes the app while
+    // the recipient is away. Hand queued messages to colleagues first.
+    await Promise.race([this.replicateAll().catch(() => {}), sleep(2000)]);
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
     for (const job of this.downloads.values()) {
@@ -367,7 +381,7 @@ class ChatEngine extends EventEmitter {
   }
 
   flushAll() {
-    for (const f of [this.config, this.peersFile, this.groupsFile, this.outboxFile, this.sharedFile, this.metaFile]) f.flush();
+    for (const f of [this.config, this.peersFile, this.groupsFile, this.outboxFile, this.sharedFile, this.metaFile, this.relayFile]) f.flush();
     for (const f of this.convFiles.values()) f.flush();
   }
 
@@ -387,6 +401,8 @@ class ChatEngine extends EventEmitter {
       status: this.me.status,
       port: this.port,
       ws: this.workspace,
+      bk: this.config.data.keys.boxPub,
+      vk: this.config.data.keys.signPub,
       ips: localAddresses()
         .map((a) => a.address)
         .slice(0, 12),
@@ -445,6 +461,8 @@ class ChatEngine extends EventEmitter {
       codeTime: Number(info.cts) || 0,
       sharingUpdates: true,
     });
+    if (typeof info.bk === 'string' && info.bk.length < 200) p.bk = info.bk;
+    if (typeof info.vk === 'string' && info.vk.length < 200) p.vk = info.vk;
     if (manual) p.manual = true;
     peers[info.id] = p;
     this.seen.set(info.id, Date.now());
@@ -455,6 +473,7 @@ class ChatEngine extends EventEmitter {
       this.introducePeer(p);
     }
     if (!wasOnline) this.flushOutbox(info.id);
+    if (!wasOnline) this.flushRelay(info.id);
     if (changed || !wasOnline || firstSeen) this.emitState();
     return p;
   }
@@ -517,7 +536,9 @@ class ChatEngine extends EventEmitter {
     for (const id of Object.keys(this.outboxFile.data)) {
       const wait = this.isOnline(id) ? 0 : OFFLINE_RETRY_MS;
       if (now - (this.lastFlushTry.get(id) || 0) >= wait) this.flushOutbox(id);
+      if (!this.isOnline(id)) this.replicate(id).catch(() => {});
     }
+    this.tickRelay(now);
     if (this.discovery) {
       for (const p of Object.values(this.peersFile.data)) {
         for (const ip of new Set([p.ip, ...(p.ips || [])].filter(isIpv4))) this.discovery.unicast(ip);
@@ -660,6 +681,8 @@ class ChatEngine extends EventEmitter {
         ips: p.ips || [],
         ver: p.appVersion,
         ws: this.workspace,
+        bk: this.peersFile.data[p.id]?.bk,
+        vk: this.peersFile.data[p.id]?.vk,
       }));
   }
 
@@ -982,6 +1005,7 @@ class ChatEngine extends EventEmitter {
       // Not reachable right now; presenceTick retries, and the colleague
       // also pulls queued messages from us via /api/collect.
       this.noteReach(pid, err);
+      this.replicate(pid).catch(() => {});
     } finally {
       this.flushing.delete(pid);
     }
@@ -991,13 +1015,187 @@ class ChatEngine extends EventEmitter {
   pendingCounts() {
     if (this.pendingIndex) return this.pendingIndex;
     const index = new Map();
+    const unrelayed = new Set();
     for (const box of Object.values(this.outboxFile.data)) {
       for (const e of box || []) {
-        if (e.type === 'msg' && e.message?.id) index.set(e.message.id, (index.get(e.message.id) || 0) + 1);
+        if (e.type !== 'msg' || !e.message?.id) continue;
+        index.set(e.message.id, (index.get(e.message.id) || 0) + 1);
+        if (!e.relayed) unrelayed.add(e.message.id);
       }
     }
+    index.unrelayed = unrelayed;
     this.pendingIndex = index;
     return index;
+  }
+
+  // ------------------------------------------------------ store and forward
+  //
+  // Queued messages normally wait on the sender's computer, so both apps had
+  // to be open at the same time. While someone is offline we also hand a
+  // sealed copy to a few colleagues who are online; whichever of them is
+  // around when that person opens OfficeLink delivers it. Only the recipient
+  // can read it. The sender's outbox stays the source of truth: when sender
+  // and recipient meet later, duplicates are ignored and ticks update.
+
+  /** Seals queued events for an offline colleague and gives them to online colleagues. */
+  async replicate(pid) {
+    if (this.replicating.has(pid)) return;
+    const target = this.peersFile.data[pid];
+    if (!target?.bk || this.isOnline(pid)) return;
+    const relays = Object.values(this.peersFile.data)
+      .filter((p) => p.id !== pid && p.vk && this.isOnline(p.id) && (p.ws || '') === this.workspace)
+      .slice(0, RELAY_COPIES);
+    if (!relays.length) return;
+    this.replicating.add(pid);
+    let handed = 0;
+    try {
+      for (let round = 0; round < 20; round++) {
+        const batch = (this.outboxFile.data[pid] || []).filter((e) => !e.relayed).slice(0, BATCH_SIZE);
+        if (!batch.length) break;
+        const item = {
+          id: uid(),
+          origin: this.me.id,
+          to: pid,
+          ts: Date.now(),
+          hint: { id: pid, ip: target.ip, port: target.port, ips: target.ips || [], ws: this.workspace },
+          sealed: sealed.seal(
+            { origin: this.me.id, to: pid, events: batch },
+            { to: pid, recipientBoxPub: target.bk, signPriv: this.config.data.keys.signPriv }
+          ),
+        };
+        const results = await Promise.all(
+          relays.map((r) =>
+            this.requestPeer(r, 'POST', '/api/relay', { from: this.publicProfile(), items: [item] }, 4000).then(
+              (res) => (res.stored || 0) > 0,
+              () => false
+            )
+          )
+        );
+        if (!results.some(Boolean)) break;
+        for (const e of batch) e.relayed = true;
+        handed += batch.length;
+        this.outboxFile.save();
+        this.pendingIndex = null;
+        this.emit('log', `Gave ${batch.length} queued event(s) for ${target.name} to ${results.filter(Boolean).length} colleague(s)`);
+      }
+    } finally {
+      this.replicating.delete(pid);
+    }
+    if (!handed) return;
+    this.emitState();
+    this.emitPendingChanges(pid);
+  }
+
+  async replicateAll() {
+    const ids = Object.keys(this.outboxFile.data).filter((id) => !this.isOnline(id));
+    await Promise.all(ids.map((id) => this.replicate(id)));
+  }
+
+  /** Re-emit the active chat's own messages so "waiting" labels refresh. */
+  emitPendingChanges(pid) {
+    const convs = new Set((this.outboxFile.data[pid] || []).filter((e) => e.type === 'msg').map((e) => e.convId));
+    for (const convId of convs) {
+      const mine = (this.convs.get(convId) || []).filter((m) => m.from === this.me.id).slice(-50);
+      if (mine.length) this.emitMessages(convId, mine);
+    }
+  }
+
+  /** Relay side: keep sealed items for someone else. Returns how many were stored. */
+  storeRelayItems(items) {
+    let stored = 0;
+    for (const item of items) {
+      if (!item || typeof item.id !== 'string' || typeof item.to !== 'string' || typeof item.origin !== 'string') continue;
+      if (!item.sealed || typeof item.sealed !== 'object') continue;
+      if (item.to === this.me.id) {
+        // Addressed to us after all: take delivery directly.
+        if (this.receiveRelayItems([item]).length) stored++;
+        continue;
+      }
+      if (item.to === item.origin) continue;
+      const list = (this.relayFile.data[item.to] ||= []);
+      if (!list.some((x) => x.id === item.id)) {
+        list.push({ id: item.id, origin: item.origin, to: item.to, ts: Date.now(), hint: item.hint || null, sealed: item.sealed });
+      }
+      let bytes = JSON.stringify(list).length;
+      while (list.length > RELAY_MAX_ITEMS || (bytes > RELAY_MAX_BYTES && list.length > 1)) {
+        list.shift();
+        bytes = JSON.stringify(list).length;
+      }
+      stored++;
+    }
+    if (stored) this.relayFile.save();
+    for (const to of new Set(items.map((i) => i?.to))) if (to && this.isOnline(to)) this.flushRelay(to);
+    return stored;
+  }
+
+  /** Relay side: hand held items to their recipient. */
+  async flushRelay(pid) {
+    const items = this.relayFile.data[pid];
+    if (!items?.length || this.relayBusy.has(pid)) return;
+    const peer = this.peersFile.data[pid];
+    if (!peer) return;
+    this.relayBusy.add(pid);
+    try {
+      const batch = items.slice(0, 20);
+      const res = await this.requestPeer(peer, 'POST', '/api/relayed', { from: this.publicProfile(), items: batch }, 8000);
+      const acked = new Set(Array.isArray(res.acks) ? res.acks : []);
+      const left = (this.relayFile.data[pid] || []).filter((x) => !acked.has(x.id));
+      if (left.length) this.relayFile.data[pid] = left;
+      else delete this.relayFile.data[pid];
+      this.relayFile.save();
+      if (acked.size) this.emit('log', `Delivered ${acked.size} held item(s) to ${peer.name}`);
+      if (acked.size && left.length) setTimeout(() => this.flushRelay(pid), 50);
+    } catch {
+      // Try again on the next tick.
+    } finally {
+      this.relayBusy.delete(pid);
+    }
+  }
+
+  /** Recipient side: open sealed items. Returns ids that were handled (or can never be). */
+  receiveRelayItems(items) {
+    const acks = [];
+    for (const item of items) {
+      if (!item || typeof item.id !== 'string' || item.to !== this.me.id) continue;
+      const sender = this.peersFile.data[item.origin];
+      if (!sender?.vk) continue; // Can't verify yet; the relay keeps it and retries.
+      const payload = sealed.open(item.sealed, { to: this.me.id, boxPriv: this.config.data.keys.boxPriv, senderSignPub: sender.vk });
+      if (!payload || payload.origin !== item.origin || payload.to !== this.me.id) {
+        acks.push(item.id); // Altered or not for us: drop it.
+        continue;
+      }
+      for (const ev of Array.isArray(payload.events) ? payload.events : []) {
+        try {
+          this.handleEvent(item.origin, ev);
+        } catch (err) {
+          this.emit('log', `Bad held event from ${item.origin}: ${err.message}`);
+        }
+      }
+      acks.push(item.id);
+    }
+    return acks;
+  }
+
+  tickRelay(now) {
+    let dirty = false;
+    for (const [pid, list] of Object.entries(this.relayFile.data)) {
+      const fresh = (list || []).filter((x) => now - (x.ts || 0) < RELAY_TTL_MS);
+      if (fresh.length !== (list || []).length) dirty = true;
+      if (!fresh.length) {
+        delete this.relayFile.data[pid];
+        continue;
+      }
+      this.relayFile.data[pid] = fresh;
+      if (this.isOnline(pid)) {
+        this.flushRelay(pid);
+      } else if (!this.peersFile.data[pid] && now - (this.relayHello.get(pid) || 0) > 30000) {
+        // We've never met this person: introduce ourselves using the sender's hint.
+        this.relayHello.set(pid, now);
+        const hint = fresh[fresh.length - 1].hint;
+        if (hint?.ip && hint.port && (hint.ws || '') === this.workspace) this.helloPeer({ ...hint, id: pid });
+      }
+    }
+    if (dirty) this.relayFile.save();
   }
 
   /**
@@ -1010,7 +1208,8 @@ class ChatEngine extends EventEmitter {
     let n = 0;
     for (const [pid, box] of Object.entries(this.outboxFile.data)) {
       if ((this.peersFile.data[pid]?.lastSeen || 0) < since) continue;
-      n += (box || []).filter((e) => e.type === 'msg').length;
+      // Copies held by colleagues are on their way; don't nag about them.
+      n += (box || []).filter((e) => e.type === 'msg' && !e.relayed).length;
     }
     return n;
   }
@@ -1135,6 +1334,20 @@ class ChatEngine extends EventEmitter {
         if (ev && ev.eid) acks.push(ev.eid);
       }
       return sendJson(res, 200, { acks });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/relay') {
+      const body = await readJsonBody(req);
+      if (!body.from || typeof body.from.id !== 'string') return sendJson(res, 400, { error: 'Missing sender' });
+      this.touchPeer(body.from, ip);
+      return sendJson(res, 200, { stored: this.storeRelayItems(Array.isArray(body.items) ? body.items : []) });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/relayed') {
+      const body = await readJsonBody(req);
+      if (!body.from || typeof body.from.id !== 'string') return sendJson(res, 400, { error: 'Missing sender' });
+      this.touchPeer(body.from, ip);
+      return sendJson(res, 200, { acks: this.receiveRelayItems(Array.isArray(body.items) ? body.items : []) });
     }
 
     const fileMatch = req.method === 'GET' && url.pathname.match(/^\/files\/([\w-]+)$/);
@@ -1945,6 +2158,7 @@ class ChatEngine extends EventEmitter {
         codeTime: p.codeTime || 0,
         sharingUpdates: !!p.sharingUpdates,
         waiting: (this.outboxFile.data[p.id] || []).filter((e) => e.type === 'msg').length,
+        relayed: (this.outboxFile.data[p.id] || []).filter((e) => e.type === 'msg' && e.relayed).length,
         reach: this.reach.get(p.id) || null,
       }))
       .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
@@ -2014,8 +2228,9 @@ class ChatEngine extends EventEmitter {
   decorate(m) {
     let out = m;
     if (m.from === this.me.id && !m.system && !m.deleted) {
-      const waiting = this.pendingCounts().get(m.id) || 0;
-      if (waiting) out = { ...out, waiting };
+      const pending = this.pendingCounts();
+      const waiting = pending.get(m.id) || 0;
+      if (waiting) out = { ...out, waiting, relayed: !pending.unrelayed.has(m.id) };
     }
     if (m.file && this.downloads.has(m.file.id)) out = { ...out, file: { ...m.file, state: 'downloading' } };
     return out;

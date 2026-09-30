@@ -101,7 +101,9 @@ function applyPack(dest, pack) {
     throw new Error('Update is missing app files');
   }
   pruneMissing(path.join(dest, 'src'), dest, new Set(written));
-  fs.writeFileSync(path.join(dest, '.officelink-rev'), `${pack.sha || ''}\n${pack.version || ''}\n`);
+  // `commit` is the git commit the pack was built from (GitHub zip); the update
+  // check compares it with the repo. Packs from colleagues only have a content hash.
+  fs.writeFileSync(path.join(dest, '.officelink-rev'), `${pack.commit || pack.sha || ''}\n${pack.version || ''}\n`);
   return written;
 }
 
@@ -258,7 +260,27 @@ function downloadUrl(url) {
   });
 }
 
+/**
+ * Latest commit of a branch through git's own HTTP protocol. Needs no git
+ * install and, unlike api.github.com (60 requests/hour shared by the whole
+ * office's IP), isn't rate limited for a few PCs checking every few minutes.
+ */
+async function githubRefSha(owner, repo, branch) {
+  const buf = await downloadUrl(`https://github.com/${owner}/${repo}.git/info/refs?service=git-upload-pack`);
+  const want = `refs/heads/${branch || 'main'}`;
+  for (const line of buf.toString('utf8').split('\n')) {
+    const m = /([0-9a-f]{40}) (refs\/heads\/[^\s\0]+)/.exec(line);
+    if (m && m[2] === want) return m[1];
+  }
+  throw new Error(`Branch ${branch || 'main'} not found`);
+}
+
 async function githubCommitSha(owner, repo, branch) {
+  try {
+    return await githubRefSha(owner, repo, branch);
+  } catch {
+    // fall back to the REST API below
+  }
   const url = branch
     ? `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`
     : `https://api.github.com/repos/${owner}/${repo}/commits/HEAD`;

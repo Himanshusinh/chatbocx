@@ -62,11 +62,43 @@ class AppUpdater {
     }
   }
 
+  /** package.json of the code that is running (updated code, or the installer's). */
+  packageInfo() {
+    for (const dir of [this.codeRoot, this.projectDir]) {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      } catch {
+        // try the next location
+      }
+    }
+    return {};
+  }
+
+  /** Written by scripts/stamp-build.js when the .dmg/.exe was built. */
+  buildInfo() {
+    for (const dir of [this.projectDir, this.codeRoot]) {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(dir, 'build-info.json'), 'utf8'));
+      } catch {
+        // not an installer build
+      }
+    }
+    return {};
+  }
+
+  /** The git commit this computer is running, if known. */
+  localCommit() {
+    if (process.env.OFFICELINK_USING_RUNTIME) return this.readInstalledRev();
+    return gitHead(this.projectDir) || this.buildInfo().sha || '';
+  }
+
   repoInfo() {
+    const pkgRepo = this.packageInfo().repository;
     const raw =
       (this.engine.settings.updateRepo || '').trim() ||
       gitOrigin(this.projectDir) ||
       gitOrigin(this.codeRoot) ||
+      (typeof pkgRepo === 'string' ? pkgRepo : pkgRepo?.url || '') ||
       '';
     const parsed = parseRepoUrl(raw);
     const branch = (this.engine.settings.updateBranch || '').trim() || parsed?.branch || 'main';
@@ -170,16 +202,14 @@ class AppUpdater {
         }
       }
     }
-    const localGit = gitHead(this.codeRoot) || gitHead(this.projectDir);
-    if (remoteSha && localGit && remoteSha === localGit) return null;
-    if (remoteSha && this.readInstalledRev() === remoteSha) return null;
     if (!remoteSha) throw new Error('Could not reach the git repository');
+    if (remoteSha === this.localCommit()) return null;
     return {
       source: 'git',
       repo,
       sha: remoteSha,
       version: local.version,
-      message: 'New code is in the git repository',
+      message: `Update available (${remoteSha.slice(0, 7)})`,
     };
   }
 
@@ -221,6 +251,7 @@ class AppUpdater {
     }
     if (repo.kind === 'github') {
       const pack = await fetchGithubPack(repo, (p) => this.emit({ message: p.message, status: 'downloading' }));
+      pack.commit = found.sha;
       await this.writeRuntime(pack);
       return;
     }
@@ -259,6 +290,7 @@ class AppUpdater {
   }
 
   readInstalledRev() {
+    if (fs.existsSync(path.join(this.runtimeDir, '.git'))) return gitHead(this.runtimeDir);
     try {
       return fs.readFileSync(path.join(this.runtimeDir, '.officelink-rev'), 'utf8').split('\n')[0].trim();
     } catch {
@@ -271,11 +303,35 @@ class AppUpdater {
   }
 }
 
+/**
+ * When the app opens and new code has been pushed to the git repository,
+ * install it and restart straight away. Later checks only show the banner so
+ * the app never restarts in the middle of a conversation. Each commit is
+ * auto-installed at most once, so a failing update can't cause a restart loop.
+ */
+async function autoUpdateOnLaunch(updater) {
+  if (!updater.engine.settings.autoUpdate) return false;
+  const state = await updater.check({ silent: true });
+  if (state.status !== 'available' || state.source !== 'git' || !state.sha) return false;
+  const marker = path.join(path.dirname(updater.runtimeDir), 'auto-update-tried');
+  let tried = '';
+  try {
+    tried = fs.readFileSync(marker, 'utf8').trim();
+  } catch {
+    tried = '';
+  }
+  if (tried === state.sha) return false;
+  await fsp.writeFile(marker, state.sha).catch(() => {});
+  await updater.apply();
+  return true;
+}
+
 async function startUpdateLoop(updater) {
   const tick = () => updater.check({ silent: true }).catch(() => {});
-  await sleep(5000);
-  tick();
-  return setInterval(tick, 10 * 60 * 1000);
+  await sleep(3000);
+  const applied = await autoUpdateOnLaunch(updater).catch(() => false);
+  if (!applied) tick();
+  return setInterval(tick, 5 * 60 * 1000);
 }
 
 module.exports = { AppUpdater, startUpdateLoop };

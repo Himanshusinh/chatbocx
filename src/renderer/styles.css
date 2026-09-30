@@ -1993,6 +1993,15 @@ mark {
   flex-shrink: 0;
 }
 
+.alert-banner.info {
+  background: var(--accent-soft);
+  border-bottom-color: var(--border);
+}
+
+.alert-banner.info > svg {
+  color: var(--accent);
+}
+
 .alert-banner.danger {
   background: rgba(239, 68, 68, 0.1);
   border-bottom-color: rgba(239, 68, 68, 0.35);

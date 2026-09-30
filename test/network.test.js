@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ChatEngine, dmId, safeFileName, compareVersions, describeNetError } = require('../src/main/engine');
+const sealed = require('../src/main/sealed');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'officelink-test-'));
 const waitFor = async (fn, label, timeout = 15000) => {
@@ -276,6 +277,37 @@ async function sha256(file) {
   // History persisted across restart
   assert(bob2.findMessage(dm, reply.id), 'history survives restart');
   console.log('✓ chat history persists across restarts');
+
+  // Store and forward: Rita is away, Sam sends and closes his app, Hana (online)
+  // holds a sealed copy and delivers it when Rita opens OfficeLink.
+  const sam = makeEngine('sam', 48001);
+  const hana = makeEngine('hana', 48101);
+  const rita = makeEngine('rita', 48201);
+  for (const e of [sam, hana, rita]) await e.start();
+  await sam.addPeerByAddress('127.0.0.1', hana.port);
+  await sam.addPeerByAddress('127.0.0.1', rita.port);
+  await hana.addPeerByAddress('127.0.0.1', rita.port);
+  await waitFor(() => sam.peersFile.data[rita.me.id]?.bk && rita.peersFile.data[sam.me.id]?.vk, 'keys exchanged');
+  const ritaPort = rita.port;
+  await rita.stop();
+  sam.seen.delete(rita.me.id);
+  hana.seen.delete(rita.me.id);
+  const samDm = dmId(sam.me.id, rita.me.id);
+  const away = sam.sendText(samDm, 'while you were away');
+  await waitFor(() => (sam.outboxFile.data[rita.me.id] || []).every((e) => e.relayed), 'copy handed to hana', 20000);
+  assert.ok(sam.getMessages(samDm).messages.find((m) => m.id === away.id).relayed, 'message shows as held by a colleague');
+  assert.ok(hana.relayFile.data[rita.me.id]?.length, 'hana holds an item for rita');
+  assert.ok(!JSON.stringify(hana.relayFile.data).includes('while you were away'), 'held copy is encrypted');
+  await sam.stop();
+  const rita2 = makeEngine('rita', ritaPort);
+  await rita2.start();
+  await waitFor(() => rita2.findMessage(samDm, away.id), 'rita receives it from hana while sam is offline', 20000);
+  await waitFor(() => !hana.relayFile.data[rita.me.id], 'hana drops the copy after delivery');
+  const tampered = sealed.seal({ origin: sam.me.id, to: rita.me.id, events: [] }, { to: rita.me.id, recipientBoxPub: rita2.config.data.keys.boxPub, signPriv: hana.config.data.keys.signPriv });
+  assert.strictEqual(sealed.open(tampered, { to: rita.me.id, boxPriv: rita2.config.data.keys.boxPriv, senderSignPub: sam.config.data.keys.signPub }), null, 'forged copies are rejected');
+  await hana.stop();
+  await rita2.stop();
+  console.log('✓ messages reach someone who was offline, even after the sender closes the app');
 
   bob2.clearConversation(dm);
   assert.strictEqual(bob2.getMessages(dm).messages.length, 0);

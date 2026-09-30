@@ -20,22 +20,47 @@ const {
 const profile = (process.env.OFFICELINK_PROFILE || '').replace(/\W/g, '');
 if (profile) app.setPath('userData', `${app.getPath('userData')}-${profile}`);
 
+/**
+ * Runs the code fetched by Settings → Update (userData/runtime) instead of the
+ * code bundled in the installer. Decided by which file is executing, not by
+ * env vars: app.relaunch() hands the old process's environment to the new
+ * one, so an inherited OFFICELINK_USING_RUNTIME used to make the relaunched
+ * app skip the new code and keep running the installer's copy.
+ */
 function loadRuntimeOverlay() {
-  if (process.env.OFFICELINK_USING_RUNTIME === '1') return false;
   const userData = app.getPath('userData');
-  const marker = path.join(userData, 'use-runtime');
-  if (!app.isPackaged && !fs.existsSync(marker)) return false;
-  const runtimeMain = path.join(userData, 'runtime', 'src', 'main', 'main.js');
-  if (!fs.existsSync(runtimeMain)) return false;
+  const runtimeDir = path.join(userData, 'runtime');
+  const runtimeMain = path.join(runtimeDir, 'src', 'main', 'main.js');
   if (path.resolve(runtimeMain) === path.resolve(__filename)) {
     process.env.OFFICELINK_USING_RUNTIME = '1';
-    process.env.OFFICELINK_RUNTIME = path.join(userData, 'runtime');
+    process.env.OFFICELINK_RUNTIME = runtimeDir;
     return false;
   }
+  delete process.env.OFFICELINK_USING_RUNTIME;
+  delete process.env.OFFICELINK_RUNTIME;
+  const marker = path.join(userData, 'use-runtime');
+  if (!app.isPackaged && !fs.existsSync(marker)) return false;
+  if (!fs.existsSync(runtimeMain)) return false;
+  // Someone installed a newer .dmg/.exe after the last update: that wins over
+  // the older downloaded code (the marker is rewritten on every update).
+  try {
+    const built = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'build-info.json'), 'utf8')).builtAt || 0;
+    if (built && built > fs.statSync(marker).mtimeMs) return false;
+  } catch {
+    // not an installer build, or never updated
+  }
   process.env.OFFICELINK_USING_RUNTIME = '1';
-  process.env.OFFICELINK_RUNTIME = path.join(userData, 'runtime');
-  require(runtimeMain);
-  return true;
+  process.env.OFFICELINK_RUNTIME = runtimeDir;
+  try {
+    require(runtimeMain);
+    return true;
+  } catch (err) {
+    // Broken update: fall back to the installer's code so the app still opens.
+    console.error('Updated code failed to load, using the installed version', err);
+    delete process.env.OFFICELINK_USING_RUNTIME;
+    delete process.env.OFFICELINK_RUNTIME;
+    return false;
+  }
 }
 
 if (loadRuntimeOverlay()) return;
@@ -370,6 +395,10 @@ async function boot() {
     send,
     showWindow,
     relaunch: () => {
+      // Installers already out there still trust this flag at startup;
+      // don't pass it to the new process or it skips the updated code.
+      delete process.env.OFFICELINK_USING_RUNTIME;
+      delete process.env.OFFICELINK_RUNTIME;
       app.relaunch();
       app.exit(0);
     },
@@ -445,7 +474,7 @@ if (!profile && !app.requestSingleInstanceLock()) {
     if (stopped || !engine) return;
     e.preventDefault();
     stopped = true;
-    Promise.race([engine.stop(), new Promise((r) => setTimeout(r, 2500))])
+    Promise.race([engine.stop(), new Promise((r) => setTimeout(r, 4500))])
       .catch(() => {})
       .finally(() => app.exit(0));
   });

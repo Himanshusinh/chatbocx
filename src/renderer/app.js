@@ -340,7 +340,8 @@ function renderSidebar() {
     const typing = typingNames(convId);
     const previewHtml = typing.length ? `<span class="typing-preview">typing…</span>` : esc(preview);
     const peer = convId.startsWith('dm:') ? peerById(peerOfDm(convId)) : null;
-    const flags = `${peer?.waiting ? `<span class="conv-flag warn" title="${peer.waiting} waiting to be delivered">${CLOCK}</span>` : ''}${isMuted(convId) ? `<span class="conv-flag" title="Muted">${ICON.mute}</span>` : ''}${isPinned(convId) ? `<span class="conv-flag" title="Pinned">${ICON.pin}</span>` : ''}`;
+    const stuck = peer ? (peer.waiting || 0) - (peer.relayed || 0) : 0;
+    const flags = `${stuck > 0 ? `<span class="conv-flag warn" title="${stuck} waiting to be delivered">${CLOCK}</span>` : ''}${isMuted(convId) ? `<span class="conv-flag" title="Muted">${ICON.mute}</span>` : ''}${isPinned(convId) ? `<span class="conv-flag" title="Pinned">${ICON.pin}</span>` : ''}`;
     return `<button class="conv-item ${convId === S.active ? 'active' : ''} ${c.unread ? 'unread' : ''} ${extraClass}" data-conv="${esc(convId)}">
       ${convIcon(convId, 36)}
       <span class="conv-text">
@@ -442,7 +443,9 @@ function renderAlert() {
       <span class="grow"></span><button class="primary-btn small" data-alert="mac">Open Settings</button>`;
   } else if (S.active.startsWith('dm:')) {
     const p = peerById(peerOfDm(S.active));
-    if (p?.waiting) {
+    if (p?.waiting && p.relayed >= p.waiting) {
+      html = `${ICON.check}<span><b>${esc(p.name)} is away.</b> Your message${p.waiting === 1 ? ' is' : 's are'} stored with a colleague and will arrive when ${esc(p.name)} opens OfficeLink — even if you close yours.</span>`;
+    } else if (p?.waiting) {
       const why = p.reach && !p.reach.ok ? p.reach.error : p.online ? 'Sending…' : `${p.name} seems to be offline`;
       html = `${CLOCK}<span><b>${p.waiting} message${p.waiting === 1 ? '' : 's'} not delivered yet.</b> ${esc(why)}. They are sent automatically when ${esc(p.name)} is reachable.</span>
         <span class="grow"></span><button class="ghost-btn small" data-alert="test">Test connection</button><button class="primary-btn small" data-alert="retry">Retry now</button>`;
@@ -450,6 +453,7 @@ function renderAlert() {
   }
   el.hidden = !html;
   el.classList.toggle('danger', !!st.localNetworkBlocked);
+  el.classList.toggle('info', html.startsWith(ICON.check));
   setHtml(el, html);
 }
 
@@ -505,6 +509,9 @@ function ticks(m) {
   const recips = recipientsCount(m.convId);
   const d = (m.deliveredTo || []).length;
   const r = (m.readBy || []).length;
+  if (m.waiting && !d && m.relayed) {
+    return `<span class="ticks sent" title="Sent. A colleague is holding it and delivers it when they open OfficeLink, even if your computer is off.">${TICK_ONE}</span>`;
+  }
   if (m.waiting && !d) {
     return `<span class="ticks waiting" title="Not delivered yet — sent automatically when they are reachable">${CLOCK}</span>`;
   }
@@ -1032,7 +1039,7 @@ function showSettings() {
         <p class="muted">Change the code, push it to git (or keep this app open on the computer that has the new code). Then click <b>Update</b> on each PC. OfficeLink fetches the new code and restarts.</p>
         <label class="field"><span>Git repository <small class="muted">(optional)</small></span>
           <input id="st-repo" value="${esc(st.settings.updateRepo || '')}" placeholder="https://github.com/you/officelink.git" />
-          <small class="muted">If you set this, Update pulls the latest code from that repo. If you leave it empty, Update fetches new code from a colleague on this Wi-Fi.</small></label>
+          <small class="muted">Leave empty to use the app's own GitHub repository. OfficeLink installs new code when it opens and shows an Update button when you push while it is open.</small></label>
         <label class="field"><span>Branch</span>
           <input id="st-branch" value="${esc(st.settings.updateBranch || 'main')}" placeholder="main" />
         </label>
@@ -1425,7 +1432,13 @@ function renderNetworkList() {
       return `<div class="nw-row" data-peer="${esc(p.id)}">
         ${avatar(p.name, p.color, { size: 32, status: peerStatus(p) })}
         <div class="nw-text"><b>${esc(p.name)}</b><span class="${r.cls}">${esc(r.text)}</span></div>
-        ${p.waiting ? `<span class="chip warn" title="Messages waiting to be delivered">${CLOCK} ${p.waiting}</span>` : ''}
+        ${
+          p.waiting > (p.relayed || 0)
+            ? `<span class="chip warn" title="Messages waiting to be delivered">${CLOCK} ${p.waiting - (p.relayed || 0)}</span>`
+            : p.waiting
+              ? `<span class="chip" title="Held by colleagues until ${esc(p.name)} opens OfficeLink">${ICON.check} ${p.waiting} held</span>`
+              : ''
+        }
         <button class="ghost-btn small" data-nw="test">Test</button>
         <button class="ghost-btn small" data-nw="chat">Chat</button>
       </div>`;

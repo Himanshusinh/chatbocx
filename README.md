@@ -44,14 +44,9 @@ To rebuild later: `npm run dist:win`
 
 Install the same app on every office computer. There is no central server to set up.
 
-## Update the app (Settings → Update)
+## Update the app — just `git push`
 
-You do **not** rebuild a DMG/exe every time. Put the new code in git (or on a PC that already has it), then click **Update**.
-
-### Pipeline
-
-1. Change the code on this computer.
-2. Push it:
+Build and share the DMG/exe **once**. After that you only push code:
 
 ```bash
 git add -A
@@ -59,14 +54,13 @@ git commit -m "your change"
 git push
 ```
 
-3. In OfficeLink → **Settings**, paste the git URL under **Git repository** (GitHub or any git remote) and click **Save**.
-4. On every office PC, open **Settings** and click **Update**.
+Every OfficeLink checks https://github.com/Himanshusinh/chatbocx (the `repository` in `package.json`):
 
-OfficeLink fetches that code, replaces what is running, and restarts. You do not need to bump the version number or build installers.
+- **When the app opens**, new code is downloaded and the app restarts on it automatically.
+- **While it is open**, it checks every 5 minutes and shows an **Update** button at the top of the chat.
+- Works without git installed (Windows PCs download a zip from GitHub). The repository must stay public.
 
-If you have not set a git URL, **Update** copies the newest code over the office Wi-Fi from a colleague who already has it. Keep OfficeLink open on the computer that has the new code.
-
-The first time, install from the DMG/exe above. After that, use the Update button.
+What `git push` **cannot** update: the Electron version or the installer itself (app name, icon, firewall rules). For those, build and share a new DMG/exe — `npm run dist:mac` / `npm run dist:win`. Build from a committed, pushed state; the build records its commit so fresh installs know they are current. A newly installed DMG/exe always takes priority over older downloaded code.
 
 ## First use
 
